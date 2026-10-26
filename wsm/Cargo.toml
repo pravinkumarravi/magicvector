@@ -7,6 +7,10 @@ description = "WebAssembly heavy-duty image vectorization acceleration engine fo
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[dependencies]
+visioncortex = "0.9.3"
+vtracer = "1.0.0-alpha.4"
+
 [profile.release]
 opt-level = 3
 lto = true
