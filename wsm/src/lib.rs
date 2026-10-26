@@ -47,6 +47,10 @@ impl ColorRgb {
     fn to_hex(&self) -> String {
         format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
     }
+
+    fn luminance(&self) -> u32 {
+        self.r as u32 * 299 + self.g as u32 * 587 + self.b as u32 * 114
+    }
 }
 
 /// Detect dominant background color from edge and corner samples
@@ -218,31 +222,73 @@ pub extern "C" fn wasm_box_blur(ptr: *mut u8, width: u32, height: u32, radius: u
     }
 }
 
-/// K-Means++ Color Quantization
+/// K-Means++ Color Quantization with Anti-Aliasing Gradient Filtering
+/// Excludes transitional edge pixels from palette seeding to eliminate gray halo rings!
 fn quantize_kmeans_plus_plus(
     pixels: &[u8],
-    total_pixels: usize,
+    width: usize,
+    height: usize,
     k: usize,
 ) -> (Vec<ColorRgb>, Vec<u8>) {
-    // 1. Gather distinct non-transparent sample colors
+    let total_pixels = width * height;
     let mut color_counts: HashMap<u32, (ColorRgb, usize)> = HashMap::new();
-    let step = std::cmp::max(1, total_pixels / 20000);
 
-    for i in (0..total_pixels).step_by(step) {
-        let idx = i * 4;
-        let a = pixels[idx + 3];
-        if a < 10 {
-            continue;
+    // 1. Gather homogeneous flat colors (skipping edge gradient pixels!)
+    for y in (1..height.saturating_sub(1)).step_by(2) {
+        for x in (1..width.saturating_sub(1)).step_by(2) {
+            let idx = (y * width + x) * 4;
+            if pixels[idx + 3] < 10 {
+                continue;
+            }
+
+            let r = pixels[idx] as i32;
+            let g = pixels[idx + 1] as i32;
+            let b = pixels[idx + 2] as i32;
+
+            let r_right = pixels[(y * width + (x + 1)) * 4] as i32;
+            let g_right = pixels[(y * width + (x + 1)) * 4 + 1] as i32;
+            let b_right = pixels[(y * width + (x + 1)) * 4 + 2] as i32;
+
+            let r_down = pixels[((y + 1) * width + x) * 4] as i32;
+            let g_down = pixels[((y + 1) * width + x) * 4 + 1] as i32;
+            let b_down = pixels[((y + 1) * width + x) * 4 + 2] as i32;
+
+            let grad = (r - r_right).abs() + (g - g_right).abs() + (b - b_right).abs()
+                     + (r - r_down).abs() + (g - g_down).abs() + (b - b_down).abs();
+
+            // Skip pixels on sharp high-contrast transitions (anti-aliased edges)
+            if grad > 30 {
+                continue;
+            }
+
+            let key = (((r as u32) >> 3) << 10) | (((g as u32) >> 3) << 5) | ((b as u32) >> 3);
+            let entry = color_counts.entry(key).or_insert((
+                ColorRgb {
+                    r: r as u8,
+                    g: g as u8,
+                    b: b as u8,
+                },
+                0,
+            ));
+            entry.1 += 1;
         }
+    }
 
-        let r = pixels[idx];
-        let g = pixels[idx + 1];
-        let b = pixels[idx + 2];
-
-        // Quantize to 5-bit key to group almost identical pixels
-        let key = ((r as u32 >> 3) << 10) | ((g as u32 >> 3) << 5) | (b as u32 >> 3);
-        let entry = color_counts.entry(key).or_insert((ColorRgb { r, g, b }, 0));
-        entry.1 += 1;
+    // Fallback if gradient filter was too strict
+    if color_counts.len() < 2 {
+        let step = std::cmp::max(1, total_pixels / 20000);
+        for i in (0..total_pixels).step_by(step) {
+            let idx = i * 4;
+            if pixels[idx + 3] < 10 {
+                continue;
+            }
+            let r = pixels[idx];
+            let g = pixels[idx + 1];
+            let b = pixels[idx + 2];
+            let key = ((r as u32 >> 3) << 10) | ((g as u32 >> 3) << 5) | (b as u32 >> 3);
+            let entry = color_counts.entry(key).or_insert((ColorRgb { r, g, b }, 0));
+            entry.1 += 1;
+        }
     }
 
     if color_counts.is_empty() {
@@ -531,10 +577,9 @@ pub extern "C" fn wasm_vectorize(
     let pixels = unsafe { std::slice::from_raw_parts_mut(ptr, total_pixels * 4) };
 
     // 1. Detect Background Color
-    let mut detected_bg = ColorRgb { r: 255, g: 255, b: 255 };
     let mut bg_buf = [255u8; 4];
     wasm_detect_background(ptr, width, height, bg_buf.as_mut_ptr());
-    detected_bg = ColorRgb {
+    let detected_bg = ColorRgb {
         r: bg_buf[0],
         g: bg_buf[1],
         b: bg_buf[2],
@@ -559,9 +604,9 @@ pub extern "C" fn wasm_vectorize(
         wasm_box_blur(ptr, width, height, blur_radius);
     }
 
-    // 3. High-Quality K-Means++ Color Quantization
+    // 3. High-Quality K-Means++ Color Quantization (gradient filtered against anti-aliasing halos)
     let k = std::cmp::max(2, std::cmp::min(num_colors as usize, 64));
-    let (palette, assignments) = quantize_kmeans_plus_plus(pixels, total_pixels, k);
+    let (palette, assignments) = quantize_kmeans_plus_plus(pixels, w, h, k);
 
     // Identify which palette color is closest to detected background
     let mut bg_color_idx: Option<usize> = None;
@@ -597,7 +642,19 @@ pub extern "C" fn wasm_vectorize(
         svg_paths_markup.push('\n');
     }
 
-    for (color_idx, color) in palette.iter().enumerate() {
+    // Order layers by luminance:
+    // Bright fills (peach skin, orange shirt, light bubble) first.
+    // Dark linework (black hair, outlines, facial features) LAST on top!
+    let mut layer_indices: Vec<usize> = (0..palette.len()).collect();
+    layer_indices.sort_by(|&a, &b| {
+        let lum_a = palette[a].luminance();
+        let lum_b = palette[b].luminance();
+        lum_b.cmp(&lum_a) // Descending: brightest fills first, darkest lines on top!
+    });
+
+    for color_idx in layer_indices {
+        let color = &palette[color_idx];
+
         // If this color is the background color, do NOT trace its outer perimeter
         // as a deformed curved polygon! It's already handled by the clean full-bleed rect or removed.
         if is_bg_match && Some(color_idx) == bg_color_idx {
@@ -630,6 +687,7 @@ pub extern "C" fn wasm_vectorize(
 
             let hex = color.to_hex();
             let sw = if stroke_width > 0.1 { stroke_width } else { 1.5 };
+            let is_dark_linework = color.luminance() < 70000; // Black / dark ink lines
 
             match stroke_mode {
                 1 => {
@@ -647,11 +705,19 @@ pub extern "C" fn wasm_vectorize(
                     ));
                 }
                 _ => {
-                    // Solid Fill with 0.5px anti-seam stroke for crisp borders
-                    svg_paths_markup.push_str(&format!(
-                        r##"<path fill="{}" stroke="{}" stroke-width="0.5" stroke-linejoin="round" fill-rule="evenodd" d="{}" />"##,
-                        hex, hex, layer_d
-                    ));
+                    // Solid Fill Mode:
+                    // If dark linework, render with smooth stroke cap & join so fine lines don't fragment!
+                    if is_dark_linework {
+                        svg_paths_markup.push_str(&format!(
+                            r##"<path fill="{}" stroke="{}" stroke-width="{:.1}" stroke-linecap="round" stroke-linejoin="round" fill-rule="evenodd" d="{}" />"##,
+                            hex, hex, sw, layer_d
+                        ));
+                    } else {
+                        svg_paths_markup.push_str(&format!(
+                            r##"<path fill="{}" stroke="{}" stroke-width="0.5" stroke-linejoin="round" fill-rule="evenodd" d="{}" />"##,
+                            hex, hex, layer_d
+                        ));
+                    }
                 }
             }
             svg_paths_markup.push('\n');
