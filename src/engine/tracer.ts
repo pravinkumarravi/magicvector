@@ -60,16 +60,16 @@ export function colorDistance(c1: RgbColor, c2: RgbColor): number {
 export const PRESETS: Record<PresetKey, PresetConfig> = {
   logo: {
     name: 'Logo / Graphic',
-    desc: 'High precision for logos, icons & crisp vector emblems',
+    desc: 'Clean vector contours & crisp curves for logos and icons',
     icon: 'Shield',
     options: {
       numberofcolors: 8,
       pathomit: 4,
-      ltres: 0.1,
-      qtres: 0.5,
-      rightangleenhance: true,
-      linefilter: false,
-      blurradius: 0,
+      ltres: 0.5,
+      qtres: 1.0,
+      rightangleenhance: false,
+      linefilter: true,
+      blurradius: 1,
       blurdelta: 20,
       roundcoords: 2,
       layering: 0
@@ -77,17 +77,17 @@ export const PRESETS: Record<PresetKey, PresetConfig> = {
   },
   artwork: {
     name: 'Anti-aliased Artwork',
-    desc: 'Smooth curves for illustrations, drawings & scans',
+    desc: 'Ultra-smooth Bézier curves for illustrations, drawings & comics',
     icon: 'Palette',
     options: {
       numberofcolors: 16,
       pathomit: 6,
-      ltres: 0.5,
-      qtres: 1.0,
+      ltres: 1.0,
+      qtres: 1.5,
       rightangleenhance: false,
       linefilter: true,
-      blurradius: 1,
-      blurdelta: 30,
+      blurradius: 2,
+      blurdelta: 20,
       roundcoords: 2,
       layering: 0
     }
@@ -285,7 +285,12 @@ export async function vectorizeImage(imageData: ImageData, userOptions: VectorOp
   } else if (wasmAccelerated && options.numberofcolors && options.numberofcolors > 1) {
     const wasmQ = wasmQuantizeKMeans(targetData, options.numberofcolors, 6);
     if (wasmQ.palette.length > 0) {
-      targetData = wasmQ.quantizedData;
+      // Only overwrite pixel buffer for strict pixel art.
+      // For artwork, logos, and photos, keep the anti-aliased gradient transitions
+      // so ImageTracer can fit smooth sub-pixel Bézier splines without pixel staircase steps!
+      if (options.preset === 'pixel') {
+        targetData = wasmQ.quantizedData;
+      }
       options.pal = wasmQ.palette;
     }
   }
