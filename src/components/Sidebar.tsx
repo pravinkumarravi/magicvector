@@ -23,7 +23,7 @@ interface SidebarProps {
   palette: PaletteItem[];
   stats: VectorStats | null;
   isProcessing: boolean;
-  onRetrace: () => void;
+  onRetrace: (customOpts?: VectorOptions) => void;
   onDownloadSvg: () => void;
   onCopySvg: () => void;
   onExportPng: (scale: number) => void;
@@ -52,11 +52,13 @@ export default function Sidebar({
     setPreset(key);
     const p = PRESETS[key];
     if (p) {
-      setOptions((prev) => ({
-        ...prev,
+      const updatedOpts: VectorOptions = {
+        ...options,
         ...p.options,
         preset: key
-      }));
+      };
+      setOptions(updatedOpts);
+      onRetrace(updatedOpts);
     }
   };
 

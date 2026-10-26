@@ -65,41 +65,58 @@ export default function App() {
   // Load an image element or URL into canvas
   const loadImage = useCallback((src: string, name: string = 'vectorized') => {
     const img = new Image();
-    img.crossOrigin = 'anonymous';
+    
+    // Crucial: Only set crossOrigin for remote http(s) URLs.
+    // Setting crossOrigin on data: or blob: URLs taints the canvas in Chromium.
+    if (src.startsWith('http://') || src.startsWith('https://')) {
+      img.crossOrigin = 'anonymous';
+    }
+
     img.onload = () => {
-      const maxDim = 1200;
-      let w = img.naturalWidth || img.width;
-      let h = img.naturalHeight || img.height;
+      try {
+        const maxDim = 1200;
+        let w = img.naturalWidth || img.width;
+        let h = img.naturalHeight || img.height;
 
-      if (w > maxDim || h > maxDim) {
-        if (w > h) {
-          h = Math.round((h * maxDim) / w);
-          w = maxDim;
-        } else {
-          w = Math.round((w * maxDim) / h);
-          h = maxDim;
+        if (w > maxDim || h > maxDim) {
+          if (w > h) {
+            h = Math.round((h * maxDim) / w);
+            w = maxDim;
+          } else {
+            w = Math.round((w * maxDim) / h);
+            h = maxDim;
+          }
         }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return;
+
+        ctx.drawImage(img, 0, 0, w, h);
+        const imgData = ctx.getImageData(0, 0, w, h);
+
+        setImageSrc(src);
+        setFileName(name.replace(/\.[^/.]+$/, ''));
+        setImageDimensions({ width: w, height: h });
+        setRawImageData(imgData);
+
+        // Always reset view to split mode so vectorization is immediately visible
+        setViewMode('split');
+        setPan({ x: 0, y: 0 });
+        setZoom(1);
+
+        executeVectorization(imgData, options);
+      } catch (err) {
+        console.error('Failed to process image canvas data:', err);
       }
-
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      if (!ctx) return;
-
-      ctx.drawImage(img, 0, 0, w, h);
-      const imgData = ctx.getImageData(0, 0, w, h);
-
-      setImageSrc(src);
-      setFileName(name.replace(/\.[^/.]+$/, ''));
-      setImageDimensions({ width: w, height: h });
-      setRawImageData(imgData);
-
-      setPan({ x: 0, y: 0 });
-      setZoom(1);
-
-      executeVectorization(imgData, options);
     };
+
+    img.onerror = (err) => {
+      console.error('Failed to load image element:', err);
+    };
+
     img.src = src;
   }, [executeVectorization, options]);
 
@@ -111,13 +128,18 @@ export default function App() {
   // File Upload Handler
   const handleFileSelect = (file: File) => {
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      if (typeof e.target?.result === 'string') {
-        loadImage(e.target.result, file.name);
-      }
-    };
-    reader.readAsDataURL(file);
+    try {
+      const objectUrl = URL.createObjectURL(file);
+      loadImage(objectUrl, file.name);
+    } catch {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        if (typeof e.target?.result === 'string') {
+          loadImage(e.target.result, file.name);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
   };
 
   // Clipboard Paste Handler (Ctrl + V)
@@ -153,9 +175,9 @@ export default function App() {
   };
 
   // Retrace Button Handler
-  const handleRetrace = () => {
+  const handleRetrace = (customOpts?: VectorOptions) => {
     if (rawImageData) {
-      executeVectorization(rawImageData, options);
+      executeVectorization(rawImageData, customOpts || options);
     }
   };
 
@@ -268,6 +290,7 @@ export default function App() {
               svgString={svgString}
               wireframeSvg={wireframeSvg}
               viewMode={viewMode}
+              setViewMode={setViewMode}
               toolMode={toolMode}
               zoom={zoom}
               setZoom={setZoom}
@@ -275,6 +298,7 @@ export default function App() {
               setPan={setPan}
               bgStyle={bgStyle}
               isProcessing={isProcessing}
+              stats={stats}
             />
 
             <Sidebar

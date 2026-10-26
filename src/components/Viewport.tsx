@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, MouseEvent, WheelEvent } from 'react';
-import { ViewMode, ToolMode, BgStyle } from '../types';
+import { ViewMode, ToolMode, BgStyle, VectorStats } from '../types';
+import { SplitSquareVertical, Layers, Image as ImageIcon, Network, CheckCircle } from 'lucide-react';
 
 interface ViewportProps {
   imageSrc: string | null;
@@ -7,6 +8,7 @@ interface ViewportProps {
   svgString: string;
   wireframeSvg: string;
   viewMode: ViewMode;
+  setViewMode: (mode: ViewMode) => void;
   toolMode: ToolMode;
   zoom: number;
   setZoom: React.Dispatch<React.SetStateAction<number>>;
@@ -14,6 +16,7 @@ interface ViewportProps {
   setPan: React.Dispatch<React.SetStateAction<{ x: number; y: number }>>;
   bgStyle: BgStyle;
   isProcessing: boolean;
+  stats?: VectorStats | null;
 }
 
 export default function Viewport({
@@ -22,13 +25,15 @@ export default function Viewport({
   svgString,
   wireframeSvg,
   viewMode,
+  setViewMode,
   toolMode,
   zoom,
   setZoom,
   pan,
   setPan,
   bgStyle,
-  isProcessing
+  isProcessing,
+  stats
 }: ViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [splitPos, setSplitPos] = useState<number>(50);
@@ -49,7 +54,7 @@ export default function Viewport({
   // Handle Pan Start
   const handleMouseDown = (e: MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
-    if (target.closest('.split-handle') || target.closest('.split-pill')) return;
+    if (target.closest('.split-handle') || target.closest('.split-pill') || target.closest('.top-floating-bar')) return;
 
     if (e.button === 0 || toolMode === 'pan') {
       setIsPanning(true);
@@ -62,7 +67,7 @@ export default function Viewport({
     if (isDraggingSplit && containerRef.current) {
       const rect = containerRef.current.getBoundingClientRect();
       const relativeX = e.clientX - rect.left;
-      const percentage = Math.max(5, Math.min(95, (relativeX / rect.width) * 100));
+      const percentage = Math.max(2, Math.min(98, (relativeX / rect.width) * 100));
       setSplitPos(percentage);
     } else if (isPanning) {
       setPan({
@@ -119,29 +124,91 @@ export default function Viewport({
       onMouseMove={handleMouseMove}
       style={{ userSelect: 'none', cursor: isPanning ? 'grabbing' : toolMode === 'pan' ? 'grab' : 'default' }}
     >
-      {/* Loading overlay indicator */}
-      {isProcessing && (
-        <div style={{
-          position: 'absolute',
-          top: '1rem',
-          right: '1rem',
-          background: 'rgba(15, 23, 42, 0.85)',
-          backdropFilter: 'blur(8px)',
-          border: '1px solid var(--accent-gold)',
-          borderRadius: '8px',
-          padding: '0.5rem 0.9rem',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.6rem',
-          zIndex: 40,
-          boxShadow: 'var(--shadow-gold)'
-        }}>
-          <div className="spinner" style={{ color: 'var(--accent-gold)' }} />
-          <span style={{ fontSize: '0.8125rem', color: '#f8fafc', fontWeight: 500 }}>
-            Vector Magic Tracing Engine Active...
-          </span>
-        </div>
-      )}
+      {/* Top Floating View Mode Badges */}
+      <div className="top-floating-bar" style={{
+        position: 'absolute',
+        top: '1rem',
+        left: '1rem',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '0.4rem',
+        background: 'rgba(15, 23, 42, 0.85)',
+        backdropFilter: 'blur(12px)',
+        border: '1px solid var(--border-subtle)',
+        borderRadius: '30px',
+        padding: '0.3rem 0.5rem',
+        zIndex: 40,
+        boxShadow: 'var(--shadow-md)'
+      }}>
+        <button
+          className={`btn ${viewMode === 'split' ? 'btn-active' : ''}`}
+          style={{ padding: '0.3rem 0.7rem', borderRadius: '20px', fontSize: '0.75rem' }}
+          onClick={() => setViewMode('split')}
+        >
+          <SplitSquareVertical size={13} />
+          <span>Split (50/50)</span>
+        </button>
+
+        <button
+          className={`btn ${viewMode === 'vector' ? 'btn-active' : ''}`}
+          style={{ padding: '0.3rem 0.7rem', borderRadius: '20px', fontSize: '0.75rem' }}
+          onClick={() => setViewMode('vector')}
+        >
+          <Layers size={13} />
+          <span>Vector Only</span>
+        </button>
+
+        <button
+          className={`btn ${viewMode === 'original' ? 'btn-active' : ''}`}
+          style={{ padding: '0.3rem 0.7rem', borderRadius: '20px', fontSize: '0.75rem' }}
+          onClick={() => setViewMode('original')}
+        >
+          <ImageIcon size={13} />
+          <span>Original Only</span>
+        </button>
+
+        <button
+          className={`btn ${viewMode === 'wireframe' ? 'btn-active' : ''}`}
+          style={{ padding: '0.3rem 0.7rem', borderRadius: '20px', fontSize: '0.75rem' }}
+          onClick={() => setViewMode('wireframe')}
+        >
+          <Network size={13} />
+          <span>Wireframe</span>
+        </button>
+      </div>
+
+      {/* Top-Right Status Badge */}
+      <div style={{
+        position: 'absolute',
+        top: '1rem',
+        right: '1rem',
+        background: 'rgba(15, 23, 42, 0.85)',
+        backdropFilter: 'blur(10px)',
+        border: isProcessing ? '1px solid var(--accent-gold)' : '1px solid var(--border-subtle)',
+        borderRadius: '8px',
+        padding: '0.45rem 0.85rem',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '0.5rem',
+        zIndex: 40,
+        boxShadow: isProcessing ? 'var(--shadow-gold)' : 'var(--shadow-sm)'
+      }}>
+        {isProcessing ? (
+          <>
+            <div className="spinner" style={{ color: 'var(--accent-gold)' }} />
+            <span style={{ fontSize: '0.75rem', color: '#f8fafc', fontWeight: 500 }}>
+              Vectorizing Image...
+            </span>
+          </>
+        ) : stats ? (
+          <>
+            <CheckCircle size={14} color="#10b981" />
+            <span style={{ fontSize: '0.75rem', color: '#f8fafc', fontWeight: 500 }}>
+              SVG Ready ({stats.pathCount} paths • {stats.colorCount} colors)
+            </span>
+          </>
+        ) : null}
+      </div>
 
       {/* Render Mode 1: SPLIT VIEW (Draggable Divider) */}
       {viewMode === 'split' && (
@@ -166,13 +233,14 @@ export default function Viewport({
               position: 'absolute',
               top: '12px',
               left: '12px',
-              background: 'rgba(0, 0, 0, 0.75)',
+              background: 'rgba(0, 0, 0, 0.8)',
               color: '#fff',
               fontSize: '11px',
-              padding: '3px 8px',
+              padding: '4px 9px',
               borderRadius: '4px',
               fontWeight: 600,
-              letterSpacing: '0.5px'
+              letterSpacing: '0.5px',
+              border: '1px solid rgba(255, 255, 255, 0.2)'
             }}>
               ORIGINAL BITMAP
             </div>
@@ -187,24 +255,37 @@ export default function Viewport({
               zIndex: 15
             }}
           >
-            {svgString && (
+            {svgString ? (
               <div
                 dangerouslySetInnerHTML={{ __html: svgString }}
                 style={{ width: '100%', height: '100%', display: 'flex' }}
               />
+            ) : (
+              <div style={{
+                width: '100%',
+                height: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: 'var(--text-muted)',
+                fontSize: '0.875rem'
+              }}>
+                Rendering Vector...
+              </div>
             )}
             {/* Split Tag Vector */}
             <div style={{
               position: 'absolute',
               top: '12px',
               right: '12px',
-              background: 'rgba(241, 196, 15, 0.9)',
+              background: 'rgba(241, 196, 15, 0.95)',
               color: '#0b0f19',
               fontSize: '11px',
-              padding: '3px 8px',
+              padding: '4px 9px',
               borderRadius: '4px',
               fontWeight: 700,
-              letterSpacing: '0.5px'
+              letterSpacing: '0.5px',
+              boxShadow: '0 2px 8px rgba(0,0,0,0.4)'
             }}>
               VECTOR MAGIC SVG
             </div>
@@ -310,12 +391,29 @@ export default function Viewport({
       {/* Render Mode 3: VECTOR ONLY */}
       {viewMode === 'vector' && (
         <div style={transformStyle}>
-          {svgString && (
+          {svgString ? (
             <div
               dangerouslySetInnerHTML={{ __html: svgString }}
               style={{ width: '100%', height: '100%' }}
             />
+          ) : (
+            <div style={{ color: 'var(--text-muted)', fontSize: '1rem' }}>
+              Vector output calculating...
+            </div>
           )}
+          <div style={{
+            position: 'absolute',
+            bottom: '12px',
+            right: '12px',
+            background: 'rgba(241, 196, 15, 0.95)',
+            color: '#0b0f19',
+            fontSize: '11px',
+            padding: '4px 10px',
+            borderRadius: '6px',
+            fontWeight: 700
+          }}>
+            PURE VECTOR SVG
+          </div>
         </div>
       )}
 
@@ -328,6 +426,19 @@ export default function Viewport({
             style={{ width: '100%', height: '100%', objectFit: 'contain' }}
             draggable={false}
           />
+          <div style={{
+            position: 'absolute',
+            bottom: '12px',
+            right: '12px',
+            background: 'rgba(0, 0, 0, 0.8)',
+            color: '#fff',
+            fontSize: '11px',
+            padding: '4px 10px',
+            borderRadius: '6px',
+            fontWeight: 600
+          }}>
+            ORIGINAL RASTER BITMAP
+          </div>
         </div>
       )}
 
@@ -351,12 +462,12 @@ export default function Viewport({
             position: 'absolute',
             bottom: '12px',
             right: '12px',
-            background: 'rgba(15, 23, 42, 0.85)',
+            background: 'rgba(15, 23, 42, 0.9)',
             color: '#38bdf8',
             fontSize: '11px',
             padding: '4px 10px',
             borderRadius: '6px',
-            border: '1px solid rgba(56, 189, 248, 0.3)',
+            border: '1px solid rgba(56, 189, 248, 0.4)',
             fontWeight: 600
           }}>
             HURRICANE BÉZIER NODES & TANGENTS

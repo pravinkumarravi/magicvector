@@ -61,7 +61,7 @@ export interface VectorStats {
 }
 
 export interface TracedataSegment {
-  type: 'line' | 'spline';
+  type: 'L' | 'Q' | string;
   x1: number;
   y1: number;
   x2: number;
@@ -72,15 +72,14 @@ export interface TracedataSegment {
 
 export interface TracedataPath {
   segments: TracedataSegment[];
-}
-
-export interface TracedataLayer {
-  color: RgbColor;
-  paths: TracedataPath[];
+  boundingbox?: number[];
+  holechildren?: any[];
+  isholepath?: boolean;
 }
 
 export interface Tracedata {
-  layers: TracedataLayer[];
+  layers: TracedataPath[][];
+  palette: RgbColor[];
   width: number;
   height: number;
 }

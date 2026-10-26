@@ -277,9 +277,9 @@ export async function vectorizeImage(imageData: ImageData, userOptions: VectorOp
   let nodeCount = 0;
   const paletteMap = new Map<string, PaletteItem>();
 
-  if (tracedata && tracedata.layers) {
-    tracedata.layers.forEach((layer) => {
-      const color = layer.color || { r: 0, g: 0, b: 0, a: 255 };
+  if (tracedata && tracedata.layers && tracedata.palette) {
+    tracedata.layers.forEach((paths, layerIdx) => {
+      const color = tracedata.palette[layerIdx] || { r: 0, g: 0, b: 0, a: 255 };
       const hex = rgbToHex(color.r, color.g, color.b);
 
       if (!paletteMap.has(hex)) {
@@ -293,12 +293,12 @@ export async function vectorizeImage(imageData: ImageData, userOptions: VectorOp
 
       const pEntry = paletteMap.get(hex)!;
 
-      if (layer.paths) {
-        pathCount += layer.paths.length;
-        pEntry.pathCount += layer.paths.length;
+      if (Array.isArray(paths)) {
+        pathCount += paths.length;
+        pEntry.pathCount += paths.length;
 
-        layer.paths.forEach((p) => {
-          if (p.segments) {
+        paths.forEach((p) => {
+          if (p && p.segments) {
             nodeCount += p.segments.length;
             pEntry.nodeCount += p.segments.length;
           }
@@ -346,14 +346,13 @@ export function generateWireframeSvg(tracedata: Tracedata, width: number, height
     '#8b5cf6', '#ec4899', '#06b6d4', '#14b8a6'
   ];
 
-  let layerIdx = 0;
-  for (const layer of tracedata.layers) {
+  for (let layerIdx = 0; layerIdx < tracedata.layers.length; layerIdx++) {
+    const paths = tracedata.layers[layerIdx];
     const strokeColor = colors[layerIdx % colors.length];
-    layerIdx++;
 
-    if (!layer.paths) continue;
+    if (!Array.isArray(paths)) continue;
 
-    for (const path of layer.paths) {
+    for (const path of paths) {
       if (!path.segments || path.segments.length === 0) continue;
 
       let d = '';
@@ -364,10 +363,10 @@ export function generateWireframeSvg(tracedata: Tracedata, width: number, height
 
       for (let s = 0; s < segs.length; s++) {
         const seg = segs[s];
-        if (seg.type === 'line') {
+        if (seg.type === 'L' || seg.type === 'line') {
           d += `L ${seg.x2} ${seg.y2} `;
           nodesMarkup += `<circle cx="${seg.x2}" cy="${seg.y2}" r="1.2" fill="#ffffff" stroke="${strokeColor}" stroke-width="0.6" />`;
-        } else if (seg.type === 'spline') {
+        } else if (seg.type === 'Q' || seg.type === 'spline') {
           d += `Q ${seg.cx} ${seg.cy} ${seg.x2} ${seg.y2} `;
           nodesMarkup += `<circle cx="${seg.cx}" cy="${seg.cy}" r="0.8" fill="${strokeColor}" opacity="0.7" />`;
           nodesMarkup += `<circle cx="${seg.x2}" cy="${seg.y2}" r="1.2" fill="#ffffff" stroke="${strokeColor}" stroke-width="0.6" />`;
@@ -380,7 +379,7 @@ export function generateWireframeSvg(tracedata: Tracedata, width: number, height
   }
 
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="100%" height="100%" style="shape-rendering: geometricPrecision;">
-    <rect width="${width}" height="${height}" fill="#0f172a" fill-opacity="0.4" />
+    <rect width="${width}" height="${height}" fill="#0f172a" fill-opacity="0.5" />
     <g class="wireframe-paths">${pathsMarkup}</g>
     <g class="wireframe-nodes">${nodesMarkup}</g>
   </svg>`;

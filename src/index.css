@@ -237,6 +237,12 @@ body {
   background-color: #080c14;
 }
 
+.viewport-container svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
 /* Checkerboard Pattern for Transparency */
 .checkerboard-pattern {
   background-image: 
