@@ -10,7 +10,8 @@ import {
   Download,
   Copy,
   Check,
-  RefreshCw
+  RefreshCw,
+  Zap
 } from 'lucide-react';
 import { PRESETS } from '../engine/tracer';
 import { PresetKey, VectorOptions, PaletteItem, VectorStats } from '../types';
@@ -397,6 +398,25 @@ export default function Sidebar({
               <div className="stat-val">{(stats.svgSize / 1024).toFixed(1)} KB</div>
             </div>
           </div>
+
+          {stats.wasmAccelerated && (
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.45rem',
+              padding: '0.4rem 0.65rem',
+              marginTop: '0.65rem',
+              background: 'linear-gradient(135deg, rgba(234, 114, 55, 0.12), rgba(217, 83, 79, 0.08))',
+              border: '1px solid rgba(234, 114, 55, 0.3)',
+              borderRadius: '6px',
+              fontSize: '0.72rem',
+              color: '#f97316',
+              fontWeight: 600
+            }}>
+              <Zap size={13} fill="#f97316" color="#f97316" />
+              <span>Rust WebAssembly Engine Active</span>
+            </div>
+          )}
         </div>
       )}
     </aside>

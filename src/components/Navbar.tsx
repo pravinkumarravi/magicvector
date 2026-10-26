@@ -48,7 +48,24 @@ export default function Navbar({
           </svg>
         </div>
         <div className="brand-title">
-          <span className="brand-name">Vector Magic</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <span className="brand-name">Vector Magic</span>
+            <span style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.25rem',
+              padding: '0.1rem 0.4rem',
+              borderRadius: '4px',
+              fontSize: '0.65rem',
+              background: 'rgba(234, 114, 55, 0.15)',
+              color: '#ea7237',
+              border: '1px solid rgba(234, 114, 55, 0.35)',
+              fontWeight: 700,
+              letterSpacing: '0.02em'
+            }}>
+              ⚡ RUST WASM
+            </span>
+          </div>
           <span className="brand-tag">Precision Image to SVG</span>
         </div>
       </div>

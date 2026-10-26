@@ -97,11 +97,30 @@ npm run preview
 ## 📦 Tech Stack
 
 - **Framework**: [React 19](https://react.dev/)
-- **Language**: [TypeScript](https://www.typescriptlang.org/)
-- **Build Tool**: [Vite 8](https://vitejs.dev/)
+- **Language**: [TypeScript](https://www.typescriptlang.org/) & [Rust](https://www.rust-lang.org/)
+- **Heavy-Duty WebAssembly Core (`wsm/`)**: High-performance Rust WebAssembly module compiled to `wasm32-unknown-unknown` executing pixel-level color quantization (K-Means), multi-point corner background detection, alpha keyout, 2D separable box blur, and noise despeckle filtering in near-native C speed.
+- **Build Tool**: [Vite 8](https://vitejs.dev/) & [Cargo](https://doc.rust-lang.org/cargo/)
 - **Icons**: [Lucide React](https://lucide.dev/)
 - **Effects**: [Canvas Confetti](https://github.com/catdad/canvas-confetti)
-- **Tracing Engine**: Custom wrapper over [ImageTracerJS](https://github.com/jankovicsandras/imagetracerjs) with customized presets and Bézier node extraction.
+- **Tracing Engine**: Custom Vector Magic pipeline with Rust WebAssembly acceleration and Bézier node extraction.
+
+---
+
+### 🦀 Compiling the Rust WebAssembly Module
+
+The heavy-duty image processing routines live in the [`wsm`](./wsm) crate:
+
+```bash
+# Ensure Rust and wasm32 target are installed
+rustup target add wasm32-unknown-unknown
+
+# Build optimized release binary
+cd wsm
+cargo build --target wasm32-unknown-unknown --release
+
+# Copy the compiled wasm binary to the public web assets
+cp target/wasm32-unknown-unknown/release/wsm.wasm ../public/wsm.wasm
+```
 
 ---
 

@@ -10,6 +10,15 @@ import {
   Tracedata,
   VectorizeResult
 } from '../types';
+import {
+  initWasm,
+  isWasmReady,
+  wasmDetectBackground,
+  wasmRemoveBackground,
+  wasmBoxBlur,
+  wasmQuantizeKMeans,
+  wasmDespeckle
+} from './wasmEngine';
 
 // Convert RGB to HEX
 export function rgbToHex(r: number, g: number, b: number): string {
@@ -140,6 +149,9 @@ export const PRESETS: Record<PresetKey, PresetConfig> = {
  * Automatically detect dominant corner/border background color
  */
 export function detectBackgroundColor(imageData: ImageData): RgbColor {
+  const wasmBg = wasmDetectBackground(imageData);
+  if (wasmBg) return wasmBg;
+
   const { data, width, height } = imageData;
   const samplePoints: [number, number][] = [
     [0, 0],
@@ -180,13 +192,18 @@ export function processImageData(
   sourceImageData: ImageData,
   { removeBackground = false, bgColor = null, bgTolerance = 25 }: { removeBackground?: boolean; bgColor?: RgbColor | null; bgTolerance?: number }
 ): { processedData: ImageData; detectedBg: RgbColor } {
-  const { width, height } = sourceImageData;
-  const processed = new ImageData(new Uint8ClampedArray(sourceImageData.data), width, height);
-  const data = processed.data;
-
   const targetBg = bgColor || detectBackgroundColor(sourceImageData);
 
   if (removeBackground) {
+    if (isWasmReady()) {
+      const { processedData } = wasmRemoveBackground(sourceImageData, targetBg, bgTolerance);
+      return { processedData, detectedBg: targetBg };
+    }
+
+    const { width, height } = sourceImageData;
+    const processed = new ImageData(new Uint8ClampedArray(sourceImageData.data), width, height);
+    const data = processed.data;
+
     for (let i = 0; i < data.length; i += 4) {
       const r = data[i];
       const g = data[i + 1];
@@ -205,9 +222,10 @@ export function processImageData(
         data[i + 3] = 0; // make transparent
       }
     }
+    return { processedData: processed, detectedBg: targetBg };
   }
 
-  return { processedData: processed, detectedBg: targetBg };
+  return { processedData: sourceImageData, detectedBg: targetBg };
 }
 
 /**
@@ -215,6 +233,10 @@ export function processImageData(
  */
 export async function vectorizeImage(imageData: ImageData, userOptions: VectorOptions = {}): Promise<VectorizeResult> {
   const startTime = performance.now();
+
+  // Initialize WebAssembly engine if not already loaded
+  await initWasm();
+  const wasmAccelerated = isWasmReady();
 
   const presetKey: PresetKey = userOptions.preset || 'logo';
   const presetConfig = PRESETS[presetKey]?.options || PRESETS.logo.options;
@@ -242,7 +264,17 @@ export async function vectorizeImage(imageData: ImageData, userOptions: VectorOp
     detectedBg = res.detectedBg;
   }
 
-  // Handle custom palette if passed
+  // Wasm-accelerated filtering: Box blur & Despeckle
+  if (wasmAccelerated) {
+    if (options.blurradius && options.blurradius > 0) {
+      targetData = wasmBoxBlur(targetData, Math.round(options.blurradius));
+    }
+    if (options.pathomit && options.pathomit > 1) {
+      targetData = wasmDespeckle(targetData, 2);
+    }
+  }
+
+  // Handle custom palette or WebAssembly K-Means Quantization
   if (options.customPalette && options.customPalette.length > 0) {
     options.pal = options.customPalette.map(c => ({
       r: c.r,
@@ -250,6 +282,12 @@ export async function vectorizeImage(imageData: ImageData, userOptions: VectorOp
       b: c.b,
       a: c.a !== undefined ? c.a : 255
     }));
+  } else if (wasmAccelerated && options.numberofcolors && options.numberofcolors > 1) {
+    const wasmQ = wasmQuantizeKMeans(targetData, options.numberofcolors, 6);
+    if (wasmQ.palette.length > 0) {
+      targetData = wasmQ.quantizedData;
+      options.pal = wasmQ.palette;
+    }
   }
 
   // Run ImageTracer
@@ -327,7 +365,8 @@ export async function vectorizeImage(imageData: ImageData, userOptions: VectorOp
       nodeCount,
       colorCount: palette.length,
       durationMs,
-      svgSize: new Blob([rawSvg]).size
+      svgSize: new Blob([rawSvg]).size,
+      wasmAccelerated
     }
   };
 }

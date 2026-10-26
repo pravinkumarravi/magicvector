@@ -58,6 +58,7 @@ export interface VectorStats {
   colorCount: number;
   durationMs: number;
   svgSize: number;
+  wasmAccelerated?: boolean;
 }
 
 export interface TracedataSegment {
