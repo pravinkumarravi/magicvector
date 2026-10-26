@@ -47,14 +47,14 @@ export async function initWasm(): Promise<WasmExports | null> {
 
   initPromise = (async () => {
     try {
-      const response = await fetch('/wsm.wasm');
+       const response = await fetch(`${import.meta.env.BASE_URL}wsm.wasm`);
       let module: WebAssembly.WebAssemblyInstantiatedSource;
 
       if ('instantiateStreaming' in WebAssembly) {
         try {
           module = await WebAssembly.instantiateStreaming(response, {});
         } catch {
-          const buffer = await (await fetch('/wsm.wasm')).arrayBuffer();
+           const buffer = await (await fetch(`${import.meta.env.BASE_URL}wsm.wasm`)).arrayBuffer();
           module = await WebAssembly.instantiate(buffer, {});
         }
       } else {
