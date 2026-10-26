@@ -301,21 +301,42 @@ export default function Sidebar({
           <div className="sidebar-section">
             <div className="section-label">Path & Stroke Style</div>
             
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.4rem', marginBottom: '0.75rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.9fr 0.9fr', gap: '0.35rem', marginBottom: '0.75rem' }}>
               <button
-                className={`btn ${(options.strokeMode || 'fill') === 'fill' ? 'btn-primary' : ''}`}
-                style={{ justifyContent: 'center', fontSize: '0.75rem', padding: '0.45rem 0.6rem' }}
-                onClick={() => setOptions(prev => ({ ...prev, strokeMode: 'fill' }))}
+                className={`btn ${(options.strokeMode || 'fill-stroke') === 'fill-stroke' ? 'btn-primary' : ''}`}
+                style={{ justifyContent: 'center', fontSize: '0.72rem', padding: '0.45rem 0.3rem', textAlign: 'center' }}
+                onClick={() => {
+                  const newOpts = { ...options, strokeMode: 'fill-stroke' as const };
+                  setOptions(newOpts);
+                  onRetrace(newOpts);
+                }}
+                title="Vector Magic Standard: Solid fill with 1px anti-seam stroke for seamless, continuous line art"
               >
-                Solid Fill
+                Fill + Stroke (VM)
+              </button>
+              <button
+                className={`btn ${options.strokeMode === 'fill' ? 'btn-primary' : ''}`}
+                style={{ justifyContent: 'center', fontSize: '0.72rem', padding: '0.45rem 0.3rem', textAlign: 'center' }}
+                onClick={() => {
+                  const newOpts = { ...options, strokeMode: 'fill' as const };
+                  setOptions(newOpts);
+                  onRetrace(newOpts);
+                }}
+                title="Pure solid filled vector paths without stroke outlines"
+              >
+                Pure Fill
               </button>
               <button
                 className={`btn ${options.strokeMode === 'stroke' ? 'btn-primary' : ''}`}
-                style={{ justifyContent: 'center', fontSize: '0.75rem', padding: '0.45rem 0.6rem' }}
-                onClick={() => setOptions(prev => ({ ...prev, strokeMode: 'stroke' }))}
-                title="Single stroke line art without solid fill (ideal for line drawings, CNC & plotters)"
+                style={{ justifyContent: 'center', fontSize: '0.72rem', padding: '0.45rem 0.3rem', textAlign: 'center' }}
+                onClick={() => {
+                  const newOpts = { ...options, strokeMode: 'stroke' as const };
+                  setOptions(newOpts);
+                  onRetrace(newOpts);
+                }}
+                title="Single stroke line art without solid fill (ideal for plotters & laser cutting)"
               >
-                Single Stroke
+                Wireframe
               </button>
             </div>
 

@@ -24,7 +24,7 @@ pub extern "C" fn wasm_free_string(ptr: *mut u8, len: usize) {
     dealloc(ptr, len);
 }
 
-/// Detect dominant background color from edge and corner samples
+/// Detect dominant background color by perimeter mode (most frequent border color)
 #[no_mangle]
 pub extern "C" fn wasm_detect_background(
     ptr: *const u8,
@@ -37,45 +37,49 @@ pub extern "C" fn wasm_detect_background(
     }
 
     let pixels = unsafe { std::slice::from_raw_parts(ptr, (width * height * 4) as usize) };
-    let sample_points: [(u32, u32); 8] = [
-        (0, 0),
-        (width - 1, 0),
-        (0, height - 1),
-        (width - 1, height - 1),
-        (width / 2, 0),
-        (0, height / 2),
-        (width - 1, height / 2),
-        (width / 2, height - 1),
-    ];
+    let mut hist: HashMap<u16, (u64, u64, u64, u64)> = HashMap::new();
 
-    let mut sum_r: u64 = 0;
-    let mut sum_g: u64 = 0;
-    let mut sum_b: u64 = 0;
-    let mut count: u64 = 0;
-
-    for (x, y) in sample_points {
+    let mut sample_pixel = |x: u32, y: u32| {
         let idx = ((y * width + x) * 4) as usize;
         let a = pixels[idx + 3];
-        if a > 10 {
-            sum_r += pixels[idx] as u64;
-            sum_g += pixels[idx + 1] as u64;
-            sum_b += pixels[idx + 2] as u64;
-            count += 1;
+        if a > 32 {
+            let r = pixels[idx];
+            let g = pixels[idx + 1];
+            let b = pixels[idx + 2];
+            let key = (((r as u16) >> 3) << 10) | (((g as u16) >> 3) << 5) | ((b as u16) >> 3);
+            let entry = hist.entry(key).or_insert((0, 0, 0, 0));
+            entry.0 += r as u64;
+            entry.1 += g as u64;
+            entry.2 += b as u64;
+            entry.3 += 1;
         }
+    };
+
+    // Sample all 4 borders of the image
+    for x in 0..width {
+        sample_pixel(x, 0);
+        sample_pixel(x, height - 1);
+    }
+    for y in 0..height {
+        sample_pixel(0, y);
+        sample_pixel(width - 1, y);
     }
 
     let out = unsafe { std::slice::from_raw_parts_mut(bg_out_ptr, 4) };
-    if count == 0 {
-        out[0] = 255;
-        out[1] = 255;
-        out[2] = 255;
-        out[3] = 255;
-    } else {
-        out[0] = (sum_r / count) as u8;
-        out[1] = (sum_g / count) as u8;
-        out[2] = (sum_b / count) as u8;
-        out[3] = 255;
+    if let Some((_, &(sr, sg, sb, count))) = hist.iter().max_by_key(|(_, v)| v.3) {
+        if count > 0 {
+            out[0] = (sr / count) as u8;
+            out[1] = (sg / count) as u8;
+            out[2] = (sb / count) as u8;
+            out[3] = 255;
+            return;
+        }
     }
+
+    out[0] = 255;
+    out[1] = 255;
+    out[2] = 255;
+    out[3] = 255;
 }
 
 /// Fast in-place background keyout with Euclidean color distance tolerance
@@ -193,6 +197,229 @@ pub extern "C" fn wasm_box_blur(ptr: *mut u8, width: u32, height: u32, radius: u
     }
 }
 
+/// Perceptually weighted color distance squared (accounting for human eye sensitivity to green > red > blue)
+#[inline(always)]
+fn color_dist_sq(r1: u8, g1: u8, b1: u8, r2: u8, g2: u8, b2: u8) -> u64 {
+    let dr = r1 as i64 - r2 as i64;
+    let dg = g1 as i64 - g2 as i64;
+    let db = b1 as i64 - b2 as i64;
+    (2 * dr * dr + 4 * dg * dg + 3 * db * db) as u64
+}
+
+/// Quantize pixels to dominant perceptual color clusters with anti-aliasing halo suppression
+pub fn quantize_palette_perceptual(pixels: &mut [u8], width: usize, height: usize, k: usize) -> Vec<(u8, u8, u8)> {
+    if k == 0 || pixels.is_empty() {
+        return Vec::new();
+    }
+
+    let total_pixels = width * height;
+
+    // 1. Collect color histogram in 5-bit quantized space (32x32x32 bins)
+    let mut hist: HashMap<u16, (u64, u64, u64, u64)> = HashMap::new();
+    for i in 0..total_pixels {
+        let idx = i * 4;
+        if pixels[idx + 3] < 32 {
+            continue; // ignore transparent
+        }
+        let r = pixels[idx];
+        let g = pixels[idx + 1];
+        let b = pixels[idx + 2];
+        let key = (((r as u16) >> 3) << 10) | (((g as u16) >> 3) << 5) | ((b as u16) >> 3);
+        let entry = hist.entry(key).or_insert((0, 0, 0, 0));
+        entry.0 += r as u64;
+        entry.1 += g as u64;
+        entry.2 += b as u64;
+        entry.3 += 1;
+    }
+
+    if hist.is_empty() {
+        return vec![(255, 255, 255)];
+    }
+
+    // Minimum pixel count for a color bin to be considered a genuine cluster center (suppresses gradient fringe bins)
+    let min_bin_count = std::cmp::max(20, (total_pixels as f64 * 0.001) as u64);
+
+    let mut candidate_bins: Vec<(u8, u8, u8, u64)> = hist
+        .values()
+        .filter(|v| v.3 >= min_bin_count)
+        .map(|&(sr, sg, sb, count)| ((sr / count) as u8, (sg / count) as u8, (sb / count) as u8, count))
+        .collect();
+    candidate_bins.sort_by(|a, b| b.3.cmp(&a.3));
+
+    // Fallback if image has very few dominant bins
+    if candidate_bins.is_empty() {
+        candidate_bins = hist
+            .values()
+            .map(|&(sr, sg, sb, count)| ((sr / count) as u8, (sg / count) as u8, (sb / count) as u8, count))
+            .collect();
+        candidate_bins.sort_by(|a, b| b.3.cmp(&a.3));
+    }
+
+    let target_k = std::cmp::min(k, candidate_bins.len());
+    let mut centers: Vec<(u8, u8, u8)> = Vec::with_capacity(target_k);
+
+    // Pick top most frequent color
+    centers.push((candidate_bins[0].0, candidate_bins[0].1, candidate_bins[0].2));
+
+    // K-Means++ initialization with minimum perceptual distance constraint to prevent halo clustering
+    let min_dist_threshold = 900u64; // distance ~30 in perceptual color space
+    while centers.len() < target_k {
+        let mut best_bin = None;
+        let mut max_weighted_dist = 0u64;
+
+        for (b_idx, bin) in candidate_bins.iter().enumerate() {
+            let mut min_dist_to_center = u64::MAX;
+            for center in &centers {
+                let d = color_dist_sq(bin.0, bin.1, bin.2, center.0, center.1, center.2);
+                if d < min_dist_to_center {
+                    min_dist_to_center = d;
+                }
+            }
+            // Only select bins that are not virtually identical to an existing center
+            if min_dist_to_center >= min_dist_threshold {
+                let weighted = min_dist_to_center.saturating_mul(bin.3);
+                if weighted > max_weighted_dist {
+                    max_weighted_dist = weighted;
+                    best_bin = Some(b_idx);
+                }
+            }
+        }
+
+        match best_bin {
+            Some(idx) => centers.push((candidate_bins[idx].0, candidate_bins[idx].1, candidate_bins[idx].2)),
+            None => break, // All significant colors are already represented!
+        }
+    }
+
+    // 2. Refine centers with 3 K-Means iterations
+    let all_bins: Vec<(u8, u8, u8, u64)> = hist
+        .values()
+        .map(|&(sr, sg, sb, count)| ((sr / count) as u8, (sg / count) as u8, (sb / count) as u8, count))
+        .collect();
+
+    for _ in 0..3 {
+        let mut sums: Vec<(u64, u64, u64, u64)> = vec![(0, 0, 0, 0); centers.len()];
+        for bin in &all_bins {
+            let mut min_d = u64::MAX;
+            let mut best_c = 0;
+            for (c_idx, c) in centers.iter().enumerate() {
+                let d = color_dist_sq(bin.0, bin.1, bin.2, c.0, c.1, c.2);
+                if d < min_d {
+                    min_d = d;
+                    best_c = c_idx;
+                }
+            }
+            sums[best_c].0 += bin.0 as u64 * bin.3;
+            sums[best_c].1 += bin.1 as u64 * bin.3;
+            sums[best_c].2 += bin.2 as u64 * bin.3;
+            sums[best_c].3 += bin.3;
+        }
+
+        for (c_idx, sum) in sums.iter().enumerate() {
+            if sum.3 > 0 {
+                centers[c_idx] = (
+                    (sum.0 / sum.3) as u8,
+                    (sum.1 / sum.3) as u8,
+                    (sum.2 / sum.3) as u8,
+                );
+            }
+        }
+    }
+
+    // 3. Remap all pixels to nearest dominant color
+    for i in 0..total_pixels {
+        let idx = i * 4;
+        if pixels[idx + 3] < 32 {
+            continue;
+        }
+        let r = pixels[idx];
+        let g = pixels[idx + 1];
+        let b = pixels[idx + 2];
+
+        let mut min_d = u64::MAX;
+        let mut best_c = 0;
+        for (c_idx, c) in centers.iter().enumerate() {
+            let d = color_dist_sq(r, g, b, c.0, c.1, c.2);
+            if d < min_d {
+                min_d = d;
+                best_c = c_idx;
+            }
+        }
+        pixels[idx] = centers[best_c].0;
+        pixels[idx + 1] = centers[best_c].1;
+        pixels[idx + 2] = centers[best_c].2;
+    }
+
+    // 4. Boundary Majority Filter Pass (eliminates 1-pixel halo transition fringes)
+    let copy = pixels.to_vec();
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let idx = (y * width + x) * 4;
+            if copy[idx + 3] < 32 {
+                continue;
+            }
+            let cur_r = copy[idx];
+            let cur_g = copy[idx + 1];
+            let cur_b = copy[idx + 2];
+
+            let mut same_count = 0;
+            let mut neighbor_counts: [(u8, u8, u8, u32); 8] = [(0, 0, 0, 0); 8];
+            let mut unique_neighbors = 0;
+
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let n_idx = (((y as i32 + dy) as usize) * width + ((x as i32 + dx) as usize)) * 4;
+                    if copy[n_idx + 3] < 32 {
+                        continue;
+                    }
+                    let nr = copy[n_idx];
+                    let ng = copy[n_idx + 1];
+                    let nb = copy[n_idx + 2];
+
+                    if nr == cur_r && ng == cur_g && nb == cur_b {
+                        same_count += 1;
+                    } else {
+                        let mut found = false;
+                        for i in 0..unique_neighbors {
+                            if neighbor_counts[i].0 == nr && neighbor_counts[i].1 == ng && neighbor_counts[i].2 == nb {
+                                neighbor_counts[i].3 += 1;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found && unique_neighbors < 8 {
+                            neighbor_counts[unique_neighbors] = (nr, ng, nb, 1);
+                            unique_neighbors += 1;
+                        }
+                    }
+                }
+            }
+
+            // If current pixel has <= 1 neighbor with the same color, it's a boundary halo sliver
+            if same_count <= 1 && unique_neighbors > 0 {
+                let mut max_n_count = 0;
+                let mut best_n = (cur_r, cur_g, cur_b);
+                for i in 0..unique_neighbors {
+                    if neighbor_counts[i].3 > max_n_count {
+                        max_n_count = neighbor_counts[i].3;
+                        best_n = (neighbor_counts[i].0, neighbor_counts[i].1, neighbor_counts[i].2);
+                    }
+                }
+                if max_n_count >= 3 {
+                    pixels[idx] = best_n.0;
+                    pixels[idx + 1] = best_n.1;
+                    pixels[idx + 2] = best_n.2;
+                }
+            }
+        }
+    }
+
+    centers
+}
+
 /// Snap anti-aliased edge transition pixels to prevent fuzzy halos along high-contrast outlines
 #[no_mangle]
 pub extern "C" fn wasm_clean_edges(ptr: *mut u8, width: u32, height: u32, threshold: u32) {
@@ -219,7 +446,6 @@ pub extern "C" fn wasm_clean_edges(ptr: *mut u8, width: u32, height: u32, thresh
             let b = copy[idx + 2] as i64;
             let lum = (r * 299 + g * 587 + b * 114) / 1000;
 
-            // Check if pixel is in a high-contrast boundary zone
             let mut dark_neighbors = 0;
             let mut light_neighbors = 0;
             let mut closest_dark = (0u8, 0u8, 0u8);
@@ -249,7 +475,6 @@ pub extern "C" fn wasm_clean_edges(ptr: *mut u8, width: u32, height: u32, thresh
                 }
             }
 
-            // If this is an anti-aliased transition pixel between dark outline and light region
             if dark_neighbors >= 2 && light_neighbors >= 2 {
                 if lum < 128 - th {
                     pixels[idx] = closest_dark.0;
@@ -316,35 +541,71 @@ pub extern "C" fn wasm_vectorize(
         wasm_remove_background(ptr, total_pixels * 4, tr, tg, tb, bg_tol);
     }
 
-    // 3. Optional pre-filter blur
+    // 3. Pre-clean anti-aliased edge fringes
+    wasm_clean_edges(ptr, width, height, 15);
+
+    // Clean outer 2 perimeter rows/columns if close to detected background
+    let bg_tol_sq = (bg_tol * bg_tol * 2) as u64;
+    for x in 0..w {
+        for &y in &[0, 1, h.saturating_sub(2), h.saturating_sub(1)] {
+            let idx = (y * w + x) * 4;
+            if pixels[idx + 3] > 32 {
+                let d = color_dist_sq(pixels[idx], pixels[idx + 1], pixels[idx + 2], detected_bg.0, detected_bg.1, detected_bg.2);
+                if d <= bg_tol_sq {
+                    pixels[idx] = detected_bg.0;
+                    pixels[idx + 1] = detected_bg.1;
+                    pixels[idx + 2] = detected_bg.2;
+                }
+            }
+        }
+    }
+    for y in 0..h {
+        for &x in &[0, 1, w.saturating_sub(2), w.saturating_sub(1)] {
+            let idx = (y * w + x) * 4;
+            if pixels[idx + 3] > 32 {
+                let d = color_dist_sq(pixels[idx], pixels[idx + 1], pixels[idx + 2], detected_bg.0, detected_bg.1, detected_bg.2);
+                if d <= bg_tol_sq {
+                    pixels[idx] = detected_bg.0;
+                    pixels[idx + 1] = detected_bg.1;
+                    pixels[idx + 2] = detected_bg.2;
+                }
+            }
+        }
+    }
+
+    // 4. Quantize to K dominant perceptual colors (eliminates muddy intermediate layers)
+    let k = if num_colors >= 2 && num_colors <= 64 { num_colors as usize } else { 12 };
+    quantize_palette_perceptual(pixels, w, h, k);
+
+    // 5. Optional pre-filter blur
     if blur_radius > 0 {
         wasm_box_blur(ptr, width, height, blur_radius);
     }
 
-    // 4. Build VTracer Config dynamically matching Detail Level (Vector Magic High / Med / Low)
+    // 6. Build VTracer Config dynamically matching Detail Level (Vector Magic High / Med / Low)
     let mut cfg = Config::from_preset(Preset::Poster);
     cfg.hierarchical = Hierarchical::Stacked;
     cfg.mode = FitMode::Spline;
     cfg.path_precision = Some(2);
+    cfg.color_precision = 8;
+    cfg.max_colors = Some(k);
 
     match detail_level {
         2 => {
             // High Detail: Vector Magic "Anti-aliased artwork, High"
             // Preserves small facial features, finger separations, and sharp cusps
             cfg.filter_speckle = std::cmp::max(2, min_path_len as usize);
-            cfg.color_precision = 8;
-            cfg.layer_difference = 14;
+            cfg.layer_difference = 12;
             cfg.corner_threshold = if corner_threshold > 0 { corner_threshold as i32 } else { 50 };
             cfg.length_threshold = 2.0;
             cfg.max_iterations = 12;
             cfg.splice_threshold = if splice_threshold > 0 { splice_threshold as i32 } else { 40 };
-            cfg.simplify = if curve_smoothness > 0.0 { Some(curve_smoothness as f64) } else { Some(0.5) };
+            cfg.simplify = if curve_smoothness > 0.0 { Some(curve_smoothness as f64) } else { Some(0.4) };
         }
         0 => {
             // Low Detail: Maximum simplification, large clean shapes
             cfg.filter_speckle = std::cmp::max(8, min_path_len as usize);
-            cfg.color_precision = 6;
-            cfg.layer_difference = 22;
+            cfg.layer_difference = 24;
             cfg.corner_threshold = if corner_threshold > 0 { corner_threshold as i32 } else { 75 };
             cfg.length_threshold = 5.5;
             cfg.max_iterations = 8;
@@ -354,13 +615,12 @@ pub extern "C" fn wasm_vectorize(
         _ => {
             // Medium Detail (Default): Balanced smooth curves & detail
             cfg.filter_speckle = std::cmp::max(4, min_path_len as usize);
-            cfg.color_precision = 7;
             cfg.layer_difference = 16;
             cfg.corner_threshold = if corner_threshold > 0 { corner_threshold as i32 } else { 60 };
             cfg.length_threshold = 3.5;
             cfg.max_iterations = 10;
             cfg.splice_threshold = if splice_threshold > 0 { splice_threshold as i32 } else { 45 };
-            cfg.simplify = if curve_smoothness > 0.0 { Some(curve_smoothness as f64) } else { Some(1.0) };
+            cfg.simplify = if curve_smoothness > 0.0 { Some(curve_smoothness as f64) } else { Some(0.8) };
         }
     }
 
@@ -395,10 +655,43 @@ pub extern "C" fn wasm_vectorize(
         svg_string = svg_string.replacen("<svg ", &format!("<svg {} ", viewbox_attr), 1);
     }
 
-    // Apply Single Stroke transform if requested by user
-    let sw = if stroke_width > 0.1 { stroke_width } else { 1.5 };
-    if stroke_mode == 1 {
-        // Single Stroke Mode: transform filled paths to clean single stroke outlines
+    // Stroke Modes:
+    // 0 = Vector Magic Standard (Solid Fill + 1px Seam-Sealing Stroke):
+    //     Every path keeps its solid fill AND gets matching 1px stroke with round linejoin.
+    //     This eliminates hairline gaps between adjacent vector shapes and gives rich, solid, smooth line art.
+    // 1 = Pure Solid Fill (fill only, no stroke attributes)
+    // 2 = Single Stroke Outlines (fill="none" stroke="..." stroke-width="sw")
+    if stroke_mode == 0 {
+        let mut enhanced = String::with_capacity(svg_string.len() + svg_string.len() / 6);
+        for line in svg_string.lines() {
+            if line.contains("<path") && line.contains("fill=\"") {
+                if let Some(fill_start) = line.find("fill=\"") {
+                    let after_fill = &line[fill_start + 6..];
+                    if let Some(quote_end) = after_fill.find('"') {
+                        let fill_val = &after_fill[..quote_end];
+                        if fill_val != "none" {
+                            let stroke_attr = format!(
+                                r#" stroke="{}" stroke-width="1" stroke-linejoin="round""#,
+                                fill_val
+                            );
+                            let mod_line = line.replacen(
+                                &format!(r#"fill="{}""#, fill_val),
+                                &format!(r#"fill="{}"{}"#, fill_val, stroke_attr),
+                                1
+                            );
+                            enhanced.push_str(&mod_line);
+                            enhanced.push('\n');
+                            continue;
+                        }
+                    }
+                }
+            }
+            enhanced.push_str(line);
+            enhanced.push('\n');
+        }
+        svg_string = enhanced;
+    } else if stroke_mode == 2 {
+        let sw = if stroke_width > 0.1 { stroke_width } else { 1.5 };
         svg_string = svg_string.replace("fill=\"", "fill=\"none\" stroke=\"");
         svg_string = svg_string.replace(
             "<path ",

@@ -33,6 +33,7 @@ export default function App() {
   const [options, setOptions] = useState<VectorOptions>({
     ...PRESETS.logo.options,
     preset: 'logo',
+    strokeMode: 'fill-stroke',
     removeBackground: false,
     bgTolerance: 25
   });

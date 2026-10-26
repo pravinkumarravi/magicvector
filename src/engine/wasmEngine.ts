@@ -235,7 +235,8 @@ export function wasmVectorizeFull(
     const bgB = options.bgColor ? options.bgColor.b : 999;
     const bgTol = options.bgTolerance || 25;
     const minPathLen = options.pathOmit !== undefined ? options.pathOmit : 2;
-    const strokeModeVal = options.strokeMode === 'stroke' ? 1 : (options.strokeMode === 'fill-stroke' ? 2 : 0);
+    // strokeMode: 0 = fill-stroke (Vector Magic standard), 1 = pure fill, 2 = single stroke outline
+    const strokeModeVal = options.strokeMode === 'stroke' ? 2 : (options.strokeMode === 'fill' ? 1 : 0);
     const strokeWidthVal = options.strokeWidth || 1.5;
 
     const detailLevelVal = options.detailLevel === 'high' ? 2 : (options.detailLevel === 'low' ? 0 : 1);
