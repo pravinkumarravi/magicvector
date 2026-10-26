@@ -238,6 +238,46 @@ export default function Sidebar({
             </div>
           </div>
 
+          {/* Path & Stroke Mode */}
+          <div className="sidebar-section">
+            <div className="section-label">Path & Stroke Style</div>
+            
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.4rem', marginBottom: '0.75rem' }}>
+              <button
+                className={`btn ${(options.strokeMode || 'fill') === 'fill' ? 'btn-primary' : ''}`}
+                style={{ justifyContent: 'center', fontSize: '0.75rem', padding: '0.45rem 0.6rem' }}
+                onClick={() => setOptions(prev => ({ ...prev, strokeMode: 'fill' }))}
+              >
+                Solid Fill
+              </button>
+              <button
+                className={`btn ${options.strokeMode === 'stroke' ? 'btn-primary' : ''}`}
+                style={{ justifyContent: 'center', fontSize: '0.75rem', padding: '0.45rem 0.6rem' }}
+                onClick={() => setOptions(prev => ({ ...prev, strokeMode: 'stroke' }))}
+                title="Single stroke line art without solid fill (ideal for line drawings, CNC & plotters)"
+              >
+                Single Stroke
+              </button>
+            </div>
+
+            {options.strokeMode === 'stroke' && (
+              <div className="control-row">
+                <div className="control-header">
+                  <span className="control-name">Stroke Line Width</span>
+                  <span className="control-value">{(options.strokeWidth || 1.5).toFixed(1)} px</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.5"
+                  max="6"
+                  step="0.25"
+                  value={options.strokeWidth || 1.5}
+                  onChange={(e) => setOptions(prev => ({ ...prev, strokeWidth: parseFloat(e.target.value) }))}
+                />
+              </div>
+            )}
+          </div>
+
           {/* Background Removal */}
           <div className="sidebar-section">
             <div className="section-label">Background & Transparency</div>

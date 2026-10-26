@@ -20,6 +20,8 @@ interface WasmExports {
     bgB: number,
     bgTol: number,
     minPathLen: number,
+    strokeMode: number,
+    strokeWidth: number,
     outLenPtr: number
   ) => number;
 }
@@ -200,6 +202,8 @@ export function wasmVectorizeFull(
     bgColor?: RgbColor | null;
     bgTolerance?: number;
     pathOmit?: number;
+    strokeMode?: 'fill' | 'stroke' | 'fill-stroke';
+    strokeWidth?: number;
   }
 ): WasmVectorizeResult | null {
   if (!wasmInstance) return null;
@@ -222,6 +226,8 @@ export function wasmVectorizeFull(
     const bgB = options.bgColor ? options.bgColor.b : 999;
     const bgTol = options.bgTolerance || 25;
     const minPathLen = options.pathOmit || 4;
+    const strokeModeVal = options.strokeMode === 'stroke' ? 1 : (options.strokeMode === 'fill-stroke' ? 2 : 0);
+    const strokeWidthVal = options.strokeWidth || 1.5;
 
     const resultPtr = wasmInstance.wasm_vectorize(
       imgPtr,
@@ -235,6 +241,8 @@ export function wasmVectorizeFull(
       bgB,
       bgTol,
       minPathLen,
+      strokeModeVal,
+      strokeWidthVal,
       outLenPtr
     );
 

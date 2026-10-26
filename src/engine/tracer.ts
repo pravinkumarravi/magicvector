@@ -258,7 +258,9 @@ export async function vectorizeImage(imageData: ImageData, userOptions: VectorOp
       removeBackground: !!options.removeBackground,
       bgColor: customBg,
       bgTolerance: options.bgTolerance || 25,
-      pathOmit: options.pathomit || 4
+      pathOmit: options.pathomit || 4,
+      strokeMode: options.strokeMode || 'fill',
+      strokeWidth: options.strokeWidth || 1.5
     });
 
     if (wasmRes && wasmRes.svg) {

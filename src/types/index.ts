@@ -40,6 +40,8 @@ export interface VectorOptions {
   bgTolerance?: number;
   customPalette?: RgbColor[];
   pal?: RgbColor[];
+  strokeMode?: 'fill' | 'stroke' | 'fill-stroke';
+  strokeWidth?: number;
   [key: string]: any;
 }
 

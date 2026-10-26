@@ -517,6 +517,8 @@ pub extern "C" fn wasm_vectorize(
     bg_b: u32,
     bg_tol: u32,
     min_path_len: u32,
+    stroke_mode: u32,
+    stroke_width: f32,
     out_len: *mut usize,
 ) -> *mut u8 {
     if ptr.is_null() || out_len.is_null() || width == 0 || height == 0 {
@@ -528,8 +530,17 @@ pub extern "C" fn wasm_vectorize(
     let total_pixels = w * h;
     let pixels = unsafe { std::slice::from_raw_parts_mut(ptr, total_pixels * 4) };
 
-    // 1. Background Keyout
+    // 1. Detect Background Color
     let mut detected_bg = ColorRgb { r: 255, g: 255, b: 255 };
+    let mut bg_buf = [255u8; 4];
+    wasm_detect_background(ptr, width, height, bg_buf.as_mut_ptr());
+    detected_bg = ColorRgb {
+        r: bg_buf[0],
+        g: bg_buf[1],
+        b: bg_buf[2],
+    };
+
+    // If explicit background removal is requested:
     if remove_bg == 1 {
         let target_bg = if bg_r <= 255 && bg_g <= 255 && bg_b <= 255 {
             ColorRgb {
@@ -538,15 +549,8 @@ pub extern "C" fn wasm_vectorize(
                 b: bg_b as u8,
             }
         } else {
-            let mut bg_buf = [255u8; 4];
-            wasm_detect_background(ptr, width, height, bg_buf.as_mut_ptr());
-            ColorRgb {
-                r: bg_buf[0],
-                g: bg_buf[1],
-                b: bg_buf[2],
-            }
+            detected_bg
         };
-        detected_bg = target_bg;
         wasm_remove_background(ptr, total_pixels * 4, target_bg.r, target_bg.g, target_bg.b, bg_tol);
     }
 
@@ -559,6 +563,18 @@ pub extern "C" fn wasm_vectorize(
     let k = std::cmp::max(2, std::cmp::min(num_colors as usize, 64));
     let (palette, assignments) = quantize_kmeans_plus_plus(pixels, total_pixels, k);
 
+    // Identify which palette color is closest to detected background
+    let mut bg_color_idx: Option<usize> = None;
+    let mut min_bg_dist = f32::MAX;
+    for (idx, color) in palette.iter().enumerate() {
+        let d = color.dist_sq(&detected_bg);
+        if d < min_bg_dist {
+            min_bg_dist = d;
+            bg_color_idx = Some(idx);
+        }
+    }
+    let is_bg_match = min_bg_dist < 1225.0; // Distance <= 35 in RGB space
+
     // 4. Contour Extraction & Midpoint Bézier Spline Smoothing
     let min_len = std::cmp::max(4, min_path_len as usize);
     let mut svg_paths_markup = String::new();
@@ -569,7 +585,25 @@ pub extern "C" fn wasm_vectorize(
     let mut total_paths = 0usize;
     let mut total_nodes = 0usize;
 
+    // Background Layer:
+    // If remove_bg == 0, insert a perfect, crisp, full-bleed rectangle at the bottom of the SVG.
+    // NEVER trace the background outer image boundary with curved midpoints, which causes the pillow/oval distortion!
+    if remove_bg == 0 && is_bg_match {
+        let bg_hex = detected_bg.to_hex();
+        svg_paths_markup.push_str(&format!(
+            r##"<rect width="{}" height="{}" fill="{}" />"##,
+            width, height, bg_hex
+        ));
+        svg_paths_markup.push('\n');
+    }
+
     for (color_idx, color) in palette.iter().enumerate() {
+        // If this color is the background color, do NOT trace its outer perimeter
+        // as a deformed curved polygon! It's already handled by the clean full-bleed rect or removed.
+        if is_bg_match && Some(color_idx) == bg_color_idx {
+            continue;
+        }
+
         let loops = trace_color_loops(w, h, color_idx as u8, &assignments, min_len);
         if loops.is_empty() {
             continue;
@@ -595,14 +629,35 @@ pub extern "C" fn wasm_vectorize(
             palette_stats.push((*color, layer_paths, layer_nodes));
 
             let hex = color.to_hex();
-            svg_paths_markup.push_str(&format!(
-                r#"<path fill="{}" fill-rule="evenodd" d="{}" />"#,
-                hex, layer_d
-            ));
+            let sw = if stroke_width > 0.1 { stroke_width } else { 1.5 };
+
+            match stroke_mode {
+                1 => {
+                    // Single Stroke Mode: pure stroke, no fill (line art / plotter / single line)
+                    svg_paths_markup.push_str(&format!(
+                        r##"<path fill="none" stroke="{}" stroke-width="{:.1}" stroke-linecap="round" stroke-linejoin="round" d="{}" />"##,
+                        hex, sw, layer_d
+                    ));
+                }
+                2 => {
+                    // Fill + Outline Stroke
+                    svg_paths_markup.push_str(&format!(
+                        r##"<path fill="{}" stroke="#0f172a" stroke-width="{:.1}" stroke-linejoin="round" fill-rule="evenodd" d="{}" />"##,
+                        hex, sw, layer_d
+                    ));
+                }
+                _ => {
+                    // Solid Fill with 0.5px anti-seam stroke for crisp borders
+                    svg_paths_markup.push_str(&format!(
+                        r##"<path fill="{}" stroke="{}" stroke-width="0.5" stroke-linejoin="round" fill-rule="evenodd" d="{}" />"##,
+                        hex, hex, layer_d
+                    ));
+                }
+            }
             svg_paths_markup.push('\n');
 
             wireframe_paths_markup.push_str(&format!(
-                r#"<path fill="none" stroke="{}" stroke-width="0.8" stroke-opacity="0.85" d="{}" />"#,
+                r##"<path fill="none" stroke="{}" stroke-width="0.8" stroke-opacity="0.85" d="{}" />"##,
                 hex, layer_d
             ));
             wireframe_paths_markup.push('\n');
