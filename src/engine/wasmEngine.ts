@@ -32,7 +32,6 @@ interface WasmExports {
 }
 
 let wasmInstance: WasmExports | null = null;
-let isInitializing = false;
 let initPromise: Promise<WasmExports | null> | null = null;
 
 export function isWasmReady(): boolean {
@@ -48,7 +47,6 @@ export async function initWasm(): Promise<WasmExports | null> {
 
   initPromise = (async () => {
     try {
-      isInitializing = true;
       const response = await fetch('/wsm.wasm');
       let module: WebAssembly.WebAssemblyInstantiatedSource;
 
@@ -71,7 +69,6 @@ export async function initWasm(): Promise<WasmExports | null> {
       console.warn('WebAssembly initialization fallback to JS:', err);
       return null;
     } finally {
-      isInitializing = false;
     }
   })();
 

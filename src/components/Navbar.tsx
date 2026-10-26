@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { Upload, Sparkles, Download, Copy, Check, X } from 'lucide-react';
+import { Upload, Download, Copy, Check, X } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { VectorStats } from '../types';
 
@@ -17,11 +17,11 @@ interface NavbarProps {
 export default function Navbar({
   imageLoaded,
   onFileSelect,
-  onLoadSample,
+  onLoadSample: _onLoadSample,
   onDownloadSvg,
   onCopySvg,
   copied,
-  stats,
+  stats: _stats,
   onClearImage
 }: NavbarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -51,22 +51,7 @@ export default function Navbar({
         </div>
         <div className="brand-title">
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <span className="brand-name">Vector Magic</span>
-            <span style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '0.25rem',
-              padding: '0.1rem 0.4rem',
-              borderRadius: '4px',
-              fontSize: '0.65rem',
-              background: 'rgba(234, 114, 55, 0.15)',
-              color: '#ea7237',
-              border: '1px solid rgba(234, 114, 55, 0.35)',
-              fontWeight: 700,
-              letterSpacing: '0.02em'
-            }}>
-              ⚡ RUST WASM
-            </span>
+            <span className="brand-name">Magic Vector</span>
           </div>
           <span className="brand-tag">Precision Image to SVG</span>
         </div>
@@ -94,25 +79,6 @@ export default function Navbar({
           <Upload size={14} />
           <span>Open Image</span>
         </button>
-
-        <div className="toolbar-group">
-          <button
-            className="btn"
-            onClick={() => onLoadSample('falcon_logo.jpg')}
-            title="Load Rocket Falcon Logo sample"
-          >
-            <Sparkles size={14} color="#f1c40f" />
-            <span>Sample Logo</span>
-          </button>
-          <button
-            className="btn"
-            onClick={() => onLoadSample('chameleon.jpg')}
-            title="Load Chameleon Mascot sample"
-          >
-            <Sparkles size={14} color="#10b981" />
-            <span>Sample Mascot</span>
-          </button>
-        </div>
 
         <div className="toolbar-divider" />
 

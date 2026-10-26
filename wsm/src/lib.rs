@@ -176,6 +176,7 @@ pub extern "C" fn wasm_box_blur(ptr: *mut u8, width: u32, height: u32, radius: u
             let mut sum_r = 0u32;
             let mut sum_g = 0u32;
             let mut sum_b = 0u32;
+            let mut sum_a = 0u32;
             let mut count = 0u32;
 
             let y_start = if y > r { y - r } else { 0 };
@@ -186,6 +187,7 @@ pub extern "C" fn wasm_box_blur(ptr: *mut u8, width: u32, height: u32, radius: u
                 sum_r += temp[idx] as u32;
                 sum_g += temp[idx + 1] as u32;
                 sum_b += temp[idx + 2] as u32;
+                sum_a += temp[idx + 3] as u32;
                 count += 1;
             }
 
@@ -193,6 +195,7 @@ pub extern "C" fn wasm_box_blur(ptr: *mut u8, width: u32, height: u32, radius: u
             pixels[out_idx] = (sum_r / count) as u8;
             pixels[out_idx + 1] = (sum_g / count) as u8;
             pixels[out_idx + 2] = (sum_b / count) as u8;
+            pixels[out_idx + 3] = (sum_a / count) as u8;
         }
     }
 }
@@ -547,7 +550,8 @@ pub extern "C" fn wasm_vectorize(
     // Clean outer 2 perimeter rows/columns if close to detected background
     let bg_tol_sq = (bg_tol * bg_tol * 2) as u64;
     for x in 0..w {
-        for &y in &[0, 1, h.saturating_sub(2), h.saturating_sub(1)] {
+        for &y in &[0usize, 1usize, h.saturating_sub(2), h.saturating_sub(1)] {
+            if y >= h { continue; }
             let idx = (y * w + x) * 4;
             if pixels[idx + 3] > 32 {
                 let d = color_dist_sq(pixels[idx], pixels[idx + 1], pixels[idx + 2], detected_bg.0, detected_bg.1, detected_bg.2);
@@ -560,7 +564,8 @@ pub extern "C" fn wasm_vectorize(
         }
     }
     for y in 0..h {
-        for &x in &[0, 1, w.saturating_sub(2), w.saturating_sub(1)] {
+        for &x in &[0usize, 1usize, w.saturating_sub(2), w.saturating_sub(1)] {
+            if x >= w { continue; }
             let idx = (y * w + x) * 4;
             if pixels[idx + 3] > 32 {
                 let d = color_dist_sq(pixels[idx], pixels[idx + 1], pixels[idx + 2], detected_bg.0, detected_bg.1, detected_bg.2);
@@ -574,6 +579,28 @@ pub extern "C" fn wasm_vectorize(
     }
 
     // 4. Quantize to K dominant perceptual colors (eliminates muddy intermediate layers)
+    // Guard: if there are no opaque pixels, return an empty SVG instead of panicking in vtracer
+    let opaque_count = (0..total_pixels).filter(|&i| pixels[i * 4 + 3] >= 32).count();
+    if opaque_count == 0 {
+        let empty_svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {} {}" width="100%" height="100%"></svg>"#,
+            width, height
+        );
+        let wireframe_svg = empty_svg.clone();
+        let json = format!(
+            "{{\"svg\":{},\"wireframe\":{},\"palette\":[],\"detectedBg\":{{\"r\":{},\"g\":{},\"b\":{}}},\"stats\":{{\"width\":{},\"height\":{},\"pathCount\":0,\"nodeCount\":0,\"colorCount\":0,\"svgSize\":{}}}}}",
+            serde_json_escape(&empty_svg),
+            serde_json_escape(&wireframe_svg),
+            detected_bg.0, detected_bg.1, detected_bg.2,
+            width, height, empty_svg.len()
+        );
+        let bytes = json.into_bytes();
+        let len = bytes.len();
+        unsafe { *out_len = len; }
+        let out_ptr = alloc(len);
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr, len); }
+        return out_ptr;
+    }
     let k = if num_colors >= 2 && num_colors <= 64 { num_colors as usize } else { 12 };
     quantize_palette_perceptual(pixels, w, h, k);
 
@@ -649,10 +676,75 @@ pub extern "C" fn wasm_vectorize(
         ),
     };
 
-    // Ensure responsive SVG viewbox
-    if !svg_string.contains("viewBox=") {
-        let viewbox_attr = format!(r#"viewBox="0 0 {} {}" width="100%" height="100%""#, width, height);
-        svg_string = svg_string.replacen("<svg ", &format!("<svg {} ", viewbox_attr), 1);
+    // Normalize SVG opening tag: ensure viewBox exists and remove duplicate width/height attributes
+    if let Some(svg_start) = svg_string.find("<svg") {
+        if let Some(rel_end) = svg_string[svg_start..].find('>') {
+            let tag_end = svg_start + rel_end;
+            let tag = &svg_string[svg_start..=tag_end];
+
+            // Strip all existing width="..." and height="..." attributes from the tag
+            let mut cleaned = String::new();
+            let mut i = 0usize;
+            while i < tag.len() {
+                // find next width or height attr
+                let rest = &tag[i..];
+                let wpos = rest.find("width=\"");
+                let hpos = rest.find("height=\"");
+                let next = match (wpos, hpos) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                };
+                if let Some(off) = next {
+                    let abs = i + off;
+                    // find the attribute name start (skip any leading space)
+                    let mut attr_start = abs;
+                    while attr_start > i && tag.as_bytes()[attr_start - 1] == b' ' {
+                        attr_start -= 1;
+                    }
+                    // copy up to attr_start
+                    cleaned.push_str(&tag[i..attr_start]);
+                    // find closing quote
+                    let after = &tag[abs..];
+                    if let Some(qrel) = after.find('"') {
+                        // find second quote
+                        if let Some(q2) = after[qrel + 1..].find('"') {
+                            let close = abs + qrel + 1 + q2 + 1;
+                            i = close;
+                            // skip trailing spaces
+                            while i < tag.len() && tag.as_bytes()[i] == b' ' {
+                                i += 1;
+                            }
+                            continue;
+                        }
+                    }
+                    // fallback: copy rest
+                    cleaned.push_str(&tag[i..]);
+                    i = tag.len();
+                } else {
+                    cleaned.push_str(&tag[i..]);
+                    break;
+                }
+            }
+
+            // Ensure viewBox exists
+            if !cleaned.contains("viewBox=") {
+                // insert before closing '>'
+                if let Some(gt) = cleaned.rfind('>') {
+                    let vb = format!(r#" viewBox="0 0 {} {}""#, width, height);
+                    cleaned.insert_str(gt, &vb);
+                }
+            }
+
+            // Add responsive width/height before final '>'
+            if let Some(gt) = cleaned.rfind('>') {
+                cleaned.insert_str(gt, r#" width="100%" height="100%""#);
+            }
+
+            let new_svg = format!("{}{}{}", &svg_string[..svg_start], cleaned, &svg_string[tag_end + 1..]);
+            svg_string = new_svg;
+        }
     }
 
     // Stroke Modes:

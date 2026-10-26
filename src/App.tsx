@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import Navbar from './components/Navbar';
 import Toolbar from './components/Toolbar';
 import Viewport from './components/Viewport';
@@ -22,17 +22,19 @@ export default function App() {
   const [rawImageData, setRawImageData] = useState<ImageData | null>(null);
 
   // Vector Result State
-  const [svgString, setSvgString] = useState<string>('');
-  const [wireframeSvg, setWireframeSvg] = useState<string>('');
+  const [fullSvgString, setFullSvgString] = useState<string>('');
+  const [fullWireframeSvg, setFullWireframeSvg] = useState<string>('');
   const [palette, setPalette] = useState<PaletteItem[]>([]);
+  const [colorOverrides, setColorOverrides] = useState<Record<string, string>>({});
+  const [selectedColors, setSelectedColors] = useState<string[]>([]);
   const [stats, setStats] = useState<VectorStats | null>(null);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
 
   // Settings State
-  const [preset, setPreset] = useState<PresetKey>('logo');
+  const [preset, setPreset] = useState<PresetKey>('artwork');
   const [options, setOptions] = useState<VectorOptions>({
-    ...PRESETS.logo.options,
-    preset: 'logo',
+    ...PRESETS.artwork.options,
+    preset: 'artwork',
     strokeMode: 'fill-stroke',
     removeBackground: false,
     bgTolerance: 25
@@ -52,9 +54,11 @@ export default function App() {
     setIsProcessing(true);
     try {
       const result = await vectorizeImage(imgData, currentOpts);
-      setSvgString(result.svgString);
-      setWireframeSvg(result.wireframeSvg);
+      setFullSvgString(result.svgString);
+      setFullWireframeSvg(result.wireframeSvg);
       setPalette(result.palette);
+      setColorOverrides({});
+      setSelectedColors(result.palette.map(p => p.hex));
       setStats(result.stats);
     } catch (err) {
       console.error('Vectorization error:', err);
@@ -122,18 +126,49 @@ export default function App() {
     img.src = src;
   }, [executeVectorization, options]);
 
-  // Clear current image and return to upload DropZone screen
+  // Filtered SVGs based on selected colors
+  const filterSvgByColors = (svg: string, selected: string[]) => {
+    if (!svg) return '';
+    const selectedSet = new Set(selected.map((c) => c.toLowerCase()));
+    return svg.replace(/<path\b[^>]*>/g, (match) => {
+      const fillMatch = match.match(/fill="([^"]*)"/i);
+      const fill = fillMatch ? fillMatch[1].toLowerCase() : '';
+      if (fill && fill !== 'none' && !selectedSet.has(fill)) return '';
+      return match;
+    });
+  };
+
+  const svgString = useMemo(() => {
+    let svg = filterSvgByColors(fullSvgString, selectedColors);
+    Object.entries(colorOverrides).forEach(([oldHex, newHex]) => {
+      svg = svg.replace(new RegExp(`fill="${oldHex}"`, 'gi'), `fill="${newHex}"`);
+      svg = svg.replace(new RegExp(`stroke="${oldHex}"`, 'gi'), `stroke="${newHex}"`);
+    });
+    return svg;
+  }, [fullSvgString, selectedColors, colorOverrides]);
+
+  const wireframeSvg = useMemo(() => {
+    let svg = filterSvgByColors(fullWireframeSvg, selectedColors);
+    Object.entries(colorOverrides).forEach(([oldHex, newHex]) => {
+      svg = svg.replace(new RegExp(`fill="${oldHex}"`, 'gi'), `fill="${newHex}"`);
+      svg = svg.replace(new RegExp(`stroke="${oldHex}"`, 'gi'), `stroke="${newHex}"`);
+    });
+    return svg;
+  }, [fullWireframeSvg, selectedColors, colorOverrides]);
+
   const handleClearImage = () => {
     setImageSrc(null);
     setRawImageData(null);
-    setSvgString('');
-    setWireframeSvg('');
+    setFullSvgString('');
+    setFullWireframeSvg('');
     setPalette([]);
+    setColorOverrides({});
+    setSelectedColors([]);
     setStats(null);
   };
 
   // File Upload Handler
-  const handleFileSelect = (file: File) => {
+  const handleFileSelect = useCallback((file: File) => {
     if (!file) return;
     try {
       const objectUrl = URL.createObjectURL(file);
@@ -147,7 +182,7 @@ export default function App() {
       };
       reader.readAsDataURL(file);
     }
-  };
+  }, [loadImage]);
 
   // Clipboard Paste Handler (Ctrl + V)
   useEffect(() => {
@@ -167,7 +202,7 @@ export default function App() {
     };
     window.addEventListener('paste', handlePaste);
     return () => window.removeEventListener('paste', handlePaste);
-  }, []);
+  }, [handleFileSelect]);
 
   // Zoom Helpers
   const handleZoomIn = () => setZoom(z => Number(Math.min(32, z * 1.25).toFixed(2)));
@@ -186,6 +221,17 @@ export default function App() {
     if (rawImageData) {
       executeVectorization(rawImageData, customOpts || options);
     }
+  };
+
+  const handleToggleColor = (hex: string) => {
+    setSelectedColors((prev) =>
+      prev.includes(hex) ? prev.filter((c) => c !== hex) : [...prev, hex]
+    );
+  };
+
+  const handleColorChange = (oldHex: string, newHex: string) => {
+    setPalette((prev) => prev.map((p) => ((p.originalHex || p.hex) === oldHex ? { ...p, hex: newHex } : p)));
+    setColorOverrides((prev) => ({ ...prev, [oldHex]: newHex }));
   };
 
   // Download SVG
@@ -242,12 +288,12 @@ export default function App() {
   // Reset to default settings
   const handleResetSettings = () => {
     const defaultOpts: VectorOptions = {
-      ...PRESETS.logo.options,
-      preset: 'logo',
+      ...PRESETS.artwork.options,
+      preset: 'artwork',
       removeBackground: false,
       bgTolerance: 25
     };
-    setPreset('logo');
+    setPreset('artwork');
     setOptions(defaultOpts);
     setZoom(1);
     setPan({ x: 0, y: 0 });
@@ -315,6 +361,9 @@ export default function App() {
               options={options}
               setOptions={setOptions}
               palette={palette}
+              selectedColors={selectedColors}
+              onToggleColor={handleToggleColor}
+              onChangeColor={handleColorChange}
               stats={stats}
               isProcessing={isProcessing}
               onRetrace={handleRetrace}

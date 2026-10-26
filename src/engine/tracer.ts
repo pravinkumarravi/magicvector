@@ -6,7 +6,6 @@ import {
   VectorOptions,
   PresetConfig,
   PresetKey,
-  VectorStats,
   Tracedata,
   VectorizeResult
 } from '../types';
@@ -15,7 +14,6 @@ import {
   isWasmReady,
   wasmDetectBackground,
   wasmRemoveBackground,
-  wasmBoxBlur,
   wasmVectorizeFull
 } from './wasmEngine';
 
@@ -57,6 +55,22 @@ export function colorDistance(c1: RgbColor, c2: RgbColor): number {
 
 // Preset mapping matching VectorMagic categories
 export const PRESETS: Record<PresetKey, PresetConfig> = {
+  artwork: {
+    name: 'Anti-aliased Artwork',
+    desc: 'High-detail cubic Bézier curves for illustrations, drawings & comics (Vector Magic High)',
+    icon: 'Palette',
+    options: {
+      numberofcolors: 16,
+      pathomit: 2,
+      detailLevel: 'high',
+      blurradius: 0,
+      cornerThreshold: 50,
+      curveSmoothness: 0.5,
+      rightangleenhance: false,
+      linefilter: true,
+      layering: 0
+    }
+  },
   logo: {
     name: 'Logo / Graphic',
     desc: 'Clean vector contours & crisp curves for logos and icons',
@@ -71,22 +85,6 @@ export const PRESETS: Record<PresetKey, PresetConfig> = {
       blurradius: 1,
       blurdelta: 20,
       roundcoords: 2,
-      layering: 0
-    }
-  },
-  artwork: {
-    name: 'Anti-aliased Artwork',
-    desc: 'High-detail cubic Bézier curves for illustrations, drawings & comics (Vector Magic High)',
-    icon: 'Palette',
-    options: {
-      numberofcolors: 16,
-      pathomit: 2,
-      detailLevel: 'high',
-      blurradius: 0,
-      cornerThreshold: 50,
-      curveSmoothness: 0.5,
-      rightangleenhance: false,
-      linefilter: true,
       layering: 0
     }
   },

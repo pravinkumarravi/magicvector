@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Shield,
   Palette,
@@ -10,8 +10,7 @@ import {
   Download,
   Copy,
   Check,
-  RefreshCw,
-  Zap
+  RefreshCw
 } from 'lucide-react';
 import { PRESETS } from '../engine/tracer';
 import { PresetKey, VectorOptions, PaletteItem, VectorStats } from '../types';
@@ -22,6 +21,9 @@ interface SidebarProps {
   options: VectorOptions;
   setOptions: React.Dispatch<React.SetStateAction<VectorOptions>>;
   palette: PaletteItem[];
+  selectedColors?: string[];
+  onToggleColor?: (hex: string) => void;
+  onChangeColor?: (oldHex: string, newHex: string) => void;
   stats: VectorStats | null;
   isProcessing: boolean;
   onRetrace: (customOpts?: VectorOptions) => void;
@@ -38,6 +40,9 @@ export default function Sidebar({
   options,
   setOptions,
   palette,
+  selectedColors,
+  onToggleColor,
+  onChangeColor,
   stats,
   isProcessing,
   onRetrace,
@@ -45,9 +50,20 @@ export default function Sidebar({
   onCopySvg,
   onExportPng,
   copied,
-  onColorClick
+  onColorClick: _onColorClick
 }: SidebarProps) {
   const [activeTab, setActiveTab] = useState<'settings' | 'palette' | 'export'>('settings');
+  const onRetraceRef = useRef(onRetrace);
+  useEffect(() => { onRetraceRef.current = onRetrace; }, [onRetrace]);
+  const isFirstRender = useRef(true);
+  useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+    const timer = setTimeout(() => onRetraceRef.current(options), 300);
+    return () => clearTimeout(timer);
+  }, [options]);
 
   const handlePresetSelect = (key: PresetKey) => {
     setPreset(key);
@@ -59,7 +75,6 @@ export default function Sidebar({
         preset: key
       };
       setOptions(updatedOpts);
-      onRetrace(updatedOpts);
     }
   };
 
@@ -177,7 +192,6 @@ export default function Sidebar({
                       cornerThreshold: lvl === 'high' ? 50 : (lvl === 'medium' ? 60 : 75)
                     };
                     setOptions(newOpts);
-                    onRetrace(newOpts);
                   }}
                 >
                   {lvl}
@@ -308,7 +322,6 @@ export default function Sidebar({
                 onClick={() => {
                   const newOpts = { ...options, strokeMode: 'fill-stroke' as const };
                   setOptions(newOpts);
-                  onRetrace(newOpts);
                 }}
                 title="Vector Magic Standard: Solid fill with 1px anti-seam stroke for seamless, continuous line art"
               >
@@ -320,7 +333,6 @@ export default function Sidebar({
                 onClick={() => {
                   const newOpts = { ...options, strokeMode: 'fill' as const };
                   setOptions(newOpts);
-                  onRetrace(newOpts);
                 }}
                 title="Pure solid filled vector paths without stroke outlines"
               >
@@ -332,7 +344,6 @@ export default function Sidebar({
                 onClick={() => {
                   const newOpts = { ...options, strokeMode: 'stroke' as const };
                   setOptions(newOpts);
-                  onRetrace(newOpts);
                 }}
                 title="Single stroke line art without solid fill (ideal for plotters & laser cutting)"
               >
@@ -366,11 +377,14 @@ export default function Sidebar({
                 Remove Background (Keyout)
               </span>
               <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={!!options.removeBackground}
-                  onChange={(e) => setOptions(prev => ({ ...prev, removeBackground: e.target.checked }))}
-                />
+              <input
+                type="checkbox"
+                checked={!!options.removeBackground}
+                onChange={(e) => {
+                  const newOpts = { ...options, removeBackground: e.target.checked };
+                  setOptions(newOpts);
+                }}
+              />
                 <span className="switch-slider" />
               </label>
             </div>
@@ -412,14 +426,14 @@ export default function Sidebar({
               <div
                 key={idx}
                 className="color-swatch"
-                style={{ backgroundColor: color.hex }}
-                onClick={() => onColorClick && onColorClick(color)}
+                style={{ backgroundColor: color.hex, opacity: (selectedColors || []).includes(color.hex) ? 1 : 0.35 }}
+                onClick={() => onToggleColor && onToggleColor(color.hex)}
                 title={`Color: ${color.hex}\nPaths: ${color.pathCount}\nNodes: ${color.nodeCount}`}
               />
             ))}
           </div>
 
-          <div style={{ marginTop: '1.25rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          <div style={{ marginTop: '1.25rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '220px', overflowY: 'auto', paddingRight: '0.25rem' }}>
             {palette && palette.slice(0, 8).map((color, idx) => (
               <div
                 key={idx}
@@ -434,10 +448,23 @@ export default function Sidebar({
                   fontSize: '0.75rem'
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                  <div style={{ width: 14, height: 14, borderRadius: 3, backgroundColor: color.hex, border: '1px solid rgba(255, 255, 255, 0.2)' }} />
-                  <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600 }}>{color.hex.toUpperCase()}</span>
-                </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                <input
+                  type="checkbox"
+                  checked={(selectedColors || []).includes(color.originalHex || color.hex)}
+                  onChange={() => onToggleColor && onToggleColor(color.originalHex || color.hex)}
+                  style={{ cursor: 'pointer' }}
+                />
+                <input
+                  type="color"
+                  value={color.hex}
+                  onChange={(e) => onChangeColor && onChangeColor(color.originalHex || color.hex, e.target.value)}
+                  style={{ width: 22, height: 22, border: 'none', background: 'none', cursor: 'pointer', padding: 0 }}
+                  title="Change color"
+                />
+                <div style={{ width: 14, height: 14, borderRadius: 3, backgroundColor: color.hex, border: '1px solid rgba(255, 255, 255, 0.2)' }} />
+                <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600 }}>{color.hex.toUpperCase()}</span>
+              </div>
                 <div style={{ color: 'var(--text-muted)' }}>
                   {color.pathCount} paths ({color.nodeCount} nodes)
                 </div>
@@ -519,24 +546,6 @@ export default function Sidebar({
             </div>
           </div>
 
-          {stats.wasmAccelerated && (
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.45rem',
-              padding: '0.4rem 0.65rem',
-              marginTop: '0.65rem',
-              background: 'linear-gradient(135deg, rgba(234, 114, 55, 0.12), rgba(217, 83, 79, 0.08))',
-              border: '1px solid rgba(234, 114, 55, 0.3)',
-              borderRadius: '6px',
-              fontSize: '0.72rem',
-              color: '#f97316',
-              fontWeight: 600
-            }}>
-              <Zap size={13} fill="#f97316" color="#f97316" />
-              <span>Rust WebAssembly Engine Active</span>
-            </div>
-          )}
         </div>
       )}
     </aside>

@@ -39,6 +39,7 @@ export default function Viewport({
   const [splitPos, setSplitPos] = useState<number>(50);
   const [isDraggingSplit, setIsDraggingSplit] = useState<boolean>(false);
   const [isPanning, setIsPanning] = useState<boolean>(false);
+  const [showReady, setShowReady] = useState<boolean>(false);
   const [panStart, setPanStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
   // Handle Wheel Zoom
@@ -82,6 +83,14 @@ export default function Viewport({
     setIsDraggingSplit(false);
     setIsPanning(false);
   };
+
+  useEffect(() => {
+    if (stats && !isProcessing) {
+      setShowReady(true);
+      const t = setTimeout(() => setShowReady(false), 3000);
+      return () => clearTimeout(t);
+    }
+  }, [stats, isProcessing]);
 
   useEffect(() => {
     window.addEventListener('mouseup', handleMouseUp);
@@ -180,32 +189,33 @@ export default function Viewport({
       {/* Top-Right Status Badge */}
       <div style={{
         position: 'absolute',
-        top: '1rem',
-        right: '1rem',
+        top: '0.75rem',
+        right: '0.75rem',
         background: 'rgba(15, 23, 42, 0.85)',
         backdropFilter: 'blur(10px)',
         border: isProcessing ? '1px solid var(--accent-gold)' : '1px solid var(--border-subtle)',
         borderRadius: '8px',
-        padding: '0.45rem 0.85rem',
+        padding: '0.35rem 0.6rem',
         display: 'flex',
         alignItems: 'center',
-        gap: '0.5rem',
+        gap: '0.35rem',
         zIndex: 40,
+        maxWidth: '260px',
         boxShadow: isProcessing ? 'var(--shadow-gold)' : 'var(--shadow-sm)'
       }}>
         {isProcessing ? (
           <>
             <div className="spinner" style={{ color: 'var(--accent-gold)' }} />
-            <span style={{ fontSize: '0.75rem', color: '#f8fafc', fontWeight: 500 }}>
+            <span style={{ fontSize: '0.7rem', color: '#f8fafc', fontWeight: 500 }}>
               Vectorizing Image...
             </span>
           </>
-        ) : stats ? (
+        ) : stats && showReady ? (
           <>
-            <CheckCircle size={14} color="#10b981" />
-            <span style={{ fontSize: '0.75rem', color: '#f8fafc', fontWeight: 500 }}>
-              SVG Ready ({stats.pathCount} paths • {stats.colorCount} colors)
-            </span>
+          <CheckCircle size={12} color="#10b981" />
+          <span style={{ fontSize: '0.7rem', color: '#f8fafc', fontWeight: 500 }}>
+            SVG Ready ({stats.pathCount} paths • {stats.colorCount} colors)
+          </span>
           </>
         ) : null}
       </div>

@@ -15,6 +15,7 @@ export interface RgbColor {
 
 export interface PaletteItem {
   hex: string;
+  originalHex?: string;
   rgb: RgbColor;
   pathCount: number;
   nodeCount: number;

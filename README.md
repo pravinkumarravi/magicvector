@@ -2,7 +2,7 @@
 
 <img src="./public/logo.svg" width="128" height="128" alt="Vector Magic Logo" />
 
-# Vector Magic — Precision Image to SVG Vectorizer
+# Magic Vector — Precision Image to SVG Vectorizer
 
 **A high-performance in-browser Bitmap to SVG conversion studio built with React 19 and TypeScript.**  
 *Reverse engineered from Vector Magic's editor workflow, featuring real-time split-view comparison, Bézier curve fitting, and Hurricane wireframe inspection.*

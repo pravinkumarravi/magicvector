@@ -35,7 +35,7 @@ export default function Toolbar({
   setViewMode,
   toolMode,
   setToolMode,
-  zoom,
+  zoom: _zoom,
   onZoomIn,
   onZoomOut,
   onZoomFit,

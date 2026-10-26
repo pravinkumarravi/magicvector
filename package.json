@@ -1,5 +1,5 @@
 {
-  "name": "vectormagic",
+  "name": "magicvector",
   "private": true,
   "version": "1.0.0",
   "description": "Precision in-browser Bitmap to SVG vector conversion studio built with React and TypeScript.",

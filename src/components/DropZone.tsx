@@ -1,12 +1,12 @@
 import React, { useState, DragEvent } from 'react';
-import { Upload, Sparkles } from 'lucide-react';
+import { Upload } from 'lucide-react';
 
 interface DropZoneProps {
   onFileSelect: (file: File) => void;
   onLoadSample: (sample: string) => void;
 }
 
-export default function DropZone({ onFileSelect, onLoadSample }: DropZoneProps) {
+export default function DropZone({ onFileSelect, onLoadSample: _onLoadSample }: DropZoneProps) {
   const [isDragging, setIsDragging] = useState<boolean>(false);
 
   const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
@@ -59,7 +59,7 @@ export default function DropZone({ onFileSelect, onLoadSample }: DropZoneProps) 
 
         <div>
           <h2 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '0.4rem', color: '#f8fafc' }}>
-            Vector Magic Studio
+            Magic Vector Studio
           </h2>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', maxWidth: '380px', lineHeight: 1.5 }}>
             Drag and drop any bitmap logo, drawing or photo to vectorize it automatically into silky smooth SVG curves.
@@ -83,30 +83,6 @@ export default function DropZone({ onFileSelect, onLoadSample }: DropZoneProps) 
 
         <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>
           Tip: You can also press <kbd style={{ padding: '2px 5px', background: 'rgba(255,255,255,0.1)', borderRadius: 4 }}>Ctrl</kbd> + <kbd style={{ padding: '2px 5px', background: 'rgba(255,255,255,0.1)', borderRadius: 4 }}>V</kbd> to paste from clipboard
-        </div>
-
-        <div style={{ width: '100%', borderTop: '1px solid var(--border-subtle)', paddingTop: '1.25rem', marginTop: '0.5rem' }}>
-          <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
-            Or try with sample images
-          </div>
-          <div className="sample-pills">
-            <button
-              className="btn"
-              onClick={() => onLoadSample('falcon_logo.jpg')}
-              style={{ background: 'rgba(241, 196, 15, 0.08)', borderColor: 'rgba(241, 196, 15, 0.3)' }}
-            >
-              <Sparkles size={14} color="#f1c40f" />
-              <span>Falcon Aerospace Logo</span>
-            </button>
-            <button
-              className="btn"
-              onClick={() => onLoadSample('chameleon.jpg')}
-              style={{ background: 'rgba(16, 185, 129, 0.08)', borderColor: 'rgba(16, 185, 129, 0.3)' }}
-            >
-              <Sparkles size={14} color="#10b981" />
-              <span>Chameleon Mascot Emblem</span>
-            </button>
-          </div>
         </div>
       </div>
     </div>
