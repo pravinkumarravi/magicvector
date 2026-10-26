@@ -7,8 +7,21 @@ interface WasmExports {
   wasm_detect_background: (ptr: number, width: number, height: number, bgOutPtr: number) => void;
   wasm_remove_background: (ptr: number, len: number, tr: number, tg: number, tb: number, tol: number) => number;
   wasm_box_blur: (ptr: number, width: number, height: number, radius: number) => void;
-  wasm_quantize_kmeans: (ptr: number, width: number, height: number, k: number, maxIters: number, palOutPtr: number) => number;
-  wasm_despeckle: (ptr: number, width: number, height: number, threshold: number) => void;
+  wasm_free_string: (ptr: number, len: number) => void;
+  wasm_vectorize: (
+    ptr: number,
+    width: number,
+    height: number,
+    numColors: number,
+    blurRadius: number,
+    removeBg: number,
+    bgR: number,
+    bgG: number,
+    bgB: number,
+    bgTol: number,
+    minPathLen: number,
+    outLenPtr: number
+  ) => number;
 }
 
 let wasmInstance: WasmExports | null = null;
@@ -151,73 +164,98 @@ export function wasmBoxBlur(imageData: ImageData, radius: number): ImageData {
   }
 }
 
+export interface WasmVectorizeResult {
+  svg: string;
+  wireframe: string;
+  palette: Array<{
+    hex: string;
+    r: number;
+    g: number;
+    b: number;
+    pathCount: number;
+    nodeCount: number;
+  }>;
+  detectedBg: { r: number; g: number; b: number };
+  stats: {
+    width: number;
+    height: number;
+    pathCount: number;
+    nodeCount: number;
+    colorCount: number;
+    svgSize: number;
+  };
+}
+
 /**
- * Heavy-duty K-Means color quantization in WebAssembly
+ * End-to-end native Rust WebAssembly Vectorizer
+ * Executes background removal, blur, K-Means++ color quantization,
+ * contour tracing, and midpoint Bézier smoothing entirely inside WebAssembly.
  */
-export function wasmQuantizeKMeans(
+export function wasmVectorizeFull(
   imageData: ImageData,
-  k: number,
-  maxIters: number = 8
-): { quantizedData: ImageData; palette: RgbColor[] } {
-  if (!wasmInstance) {
-    return { quantizedData: imageData, palette: [] };
+  options: {
+    numColors?: number;
+    blurRadius?: number;
+    removeBackground?: boolean;
+    bgColor?: RgbColor | null;
+    bgTolerance?: number;
+    pathOmit?: number;
   }
+): WasmVectorizeResult | null {
+  if (!wasmInstance) return null;
 
   const { width, height, data } = imageData;
   const size = data.length;
-  const clampedK = Math.min(64, Math.max(2, k));
 
-  const ptr = wasmInstance.alloc(size);
-  const palOutPtr = wasmInstance.alloc(clampedK * 4);
-
-  try {
-    const memory = new Uint8Array(wasmInstance.memory.buffer);
-    memory.set(data, ptr);
-
-    const actualK = wasmInstance.wasm_quantize_kmeans(ptr, width, height, clampedK, maxIters, palOutPtr);
-
-    const resultMem = new Uint8ClampedArray(wasmInstance.memory.buffer, ptr, size);
-    const quantizedData = new ImageData(new Uint8ClampedArray(resultMem), width, height);
-
-    const palMem = new Uint8Array(wasmInstance.memory.buffer);
-    const palette: RgbColor[] = [];
-
-    for (let i = 0; i < actualK; i++) {
-      const offset = palOutPtr + i * 4;
-      palette.push({
-        r: palMem[offset],
-        g: palMem[offset + 1],
-        b: palMem[offset + 2],
-        a: palMem[offset + 3]
-      });
-    }
-
-    return { quantizedData, palette };
-  } finally {
-    wasmInstance.dealloc(ptr, size);
-    wasmInstance.dealloc(palOutPtr, clampedK * 4);
-  }
-}
-
-/**
- * Noise despeckle filter in WebAssembly
- */
-export function wasmDespeckle(imageData: ImageData, threshold: number = 2): ImageData {
-  if (!wasmInstance) return imageData;
-
-  const { width, height, data } = imageData;
-  const size = data.length;
-  const ptr = wasmInstance.alloc(size);
+  const imgPtr = wasmInstance.alloc(size);
+  const outLenPtr = wasmInstance.alloc(4);
 
   try {
     const memory = new Uint8Array(wasmInstance.memory.buffer);
-    memory.set(data, ptr);
+    memory.set(data, imgPtr);
 
-    wasmInstance.wasm_despeckle(ptr, width, height, threshold);
+    const numColors = options.numColors || 12;
+    const blurRadius = options.blurRadius || 0;
+    const removeBg = options.removeBackground ? 1 : 0;
+    const bgR = options.bgColor ? options.bgColor.r : 999;
+    const bgG = options.bgColor ? options.bgColor.g : 999;
+    const bgB = options.bgColor ? options.bgColor.b : 999;
+    const bgTol = options.bgTolerance || 25;
+    const minPathLen = options.pathOmit || 4;
 
-    const resultMem = new Uint8ClampedArray(wasmInstance.memory.buffer, ptr, size);
-    return new ImageData(new Uint8ClampedArray(resultMem), width, height);
+    const resultPtr = wasmInstance.wasm_vectorize(
+      imgPtr,
+      width,
+      height,
+      numColors,
+      blurRadius,
+      removeBg,
+      bgR,
+      bgG,
+      bgB,
+      bgTol,
+      minPathLen,
+      outLenPtr
+    );
+
+    if (resultPtr === 0) return null;
+
+    const lenView = new DataView(wasmInstance.memory.buffer);
+    const resultLen = lenView.getUint32(outLenPtr, true);
+
+    const jsonBytes = new Uint8Array(wasmInstance.memory.buffer, resultPtr, resultLen);
+    const decoder = new TextDecoder('utf-8');
+    const jsonStr = decoder.decode(jsonBytes);
+
+    wasmInstance.wasm_free_string(resultPtr, resultLen);
+
+    return JSON.parse(jsonStr) as WasmVectorizeResult;
+  } catch (err) {
+    console.error('Wasm full vectorization error:', err);
+    return null;
   } finally {
-    wasmInstance.dealloc(ptr, size);
+    wasmInstance.dealloc(imgPtr, size);
+    wasmInstance.dealloc(outLenPtr, 4);
   }
 }
+

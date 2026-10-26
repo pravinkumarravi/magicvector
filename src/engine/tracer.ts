@@ -16,8 +16,7 @@ import {
   wasmDetectBackground,
   wasmRemoveBackground,
   wasmBoxBlur,
-  wasmQuantizeKMeans,
-  wasmDespeckle
+  wasmVectorizeFull
 } from './wasmEngine';
 
 // Convert RGB to HEX
@@ -250,7 +249,46 @@ export async function vectorizeImage(imageData: ImageData, userOptions: VectorOp
     desc: false
   };
 
-  // Background removal pre-processing
+  // 1. NATIVE RUST WEBASSEMBLY FULL PIPELINE
+  if (wasmAccelerated) {
+    const customBg = options.customBgColor ? hexToRgb(options.customBgColor) : null;
+    const wasmRes = wasmVectorizeFull(imageData, {
+      numColors: options.numberofcolors || 12,
+      blurRadius: Math.round(options.blurradius || 0),
+      removeBackground: !!options.removeBackground,
+      bgColor: customBg,
+      bgTolerance: options.bgTolerance || 25,
+      pathOmit: options.pathomit || 4
+    });
+
+    if (wasmRes && wasmRes.svg) {
+      const durationMs = Math.round(performance.now() - startTime);
+      return {
+        svgString: wasmRes.svg,
+        wireframeSvg: wasmRes.wireframe,
+        tracedata: { layers: [], palette: [], width: wasmRes.stats.width, height: wasmRes.stats.height },
+        palette: wasmRes.palette.map(p => ({
+          hex: p.hex,
+          rgb: { r: p.r, g: p.g, b: p.b, a: 255 },
+          pathCount: p.pathCount,
+          nodeCount: p.nodeCount
+        })),
+        detectedBg: { ...wasmRes.detectedBg, a: 255 },
+        stats: {
+          width: wasmRes.stats.width,
+          height: wasmRes.stats.height,
+          pathCount: wasmRes.stats.pathCount,
+          nodeCount: wasmRes.stats.nodeCount,
+          colorCount: wasmRes.stats.colorCount,
+          durationMs,
+          svgSize: new Blob([wasmRes.svg]).size,
+          wasmAccelerated: true
+        }
+      };
+    }
+  }
+
+  // 2. Fallback to JS ImageTracer if Wasm is not ready
   let targetData = imageData;
   let detectedBg: RgbColor = { r: 255, g: 255, b: 255, a: 255 };
 
@@ -264,17 +302,7 @@ export async function vectorizeImage(imageData: ImageData, userOptions: VectorOp
     detectedBg = res.detectedBg;
   }
 
-  // Wasm-accelerated filtering: Box blur & Despeckle
-  if (wasmAccelerated) {
-    if (options.blurradius && options.blurradius > 0) {
-      targetData = wasmBoxBlur(targetData, Math.round(options.blurradius));
-    }
-    if (options.pathomit && options.pathomit > 1) {
-      targetData = wasmDespeckle(targetData, 2);
-    }
-  }
-
-  // Handle custom palette or WebAssembly K-Means Quantization
+  // Handle custom palette in JS fallback
   if (options.customPalette && options.customPalette.length > 0) {
     options.pal = options.customPalette.map(c => ({
       r: c.r,
@@ -282,17 +310,6 @@ export async function vectorizeImage(imageData: ImageData, userOptions: VectorOp
       b: c.b,
       a: c.a !== undefined ? c.a : 255
     }));
-  } else if (wasmAccelerated && options.numberofcolors && options.numberofcolors > 1) {
-    const wasmQ = wasmQuantizeKMeans(targetData, options.numberofcolors, 6);
-    if (wasmQ.palette.length > 0) {
-      // Only overwrite pixel buffer for strict pixel art.
-      // For artwork, logos, and photos, keep the anti-aliased gradient transitions
-      // so ImageTracer can fit smooth sub-pixel Bézier splines without pixel staircase steps!
-      if (options.preset === 'pixel') {
-        targetData = wasmQ.quantizedData;
-      }
-      options.pal = wasmQ.palette;
-    }
   }
 
   // Run ImageTracer
