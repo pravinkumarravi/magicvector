@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { Upload, Sparkles, Download, Copy, Check } from 'lucide-react';
+import { Upload, Sparkles, Download, Copy, Check, X } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { VectorStats } from '../types';
 
@@ -11,6 +11,7 @@ interface NavbarProps {
   onCopySvg: () => void;
   copied: boolean;
   stats: VectorStats | null;
+  onClearImage?: () => void;
 }
 
 export default function Navbar({
@@ -20,7 +21,8 @@ export default function Navbar({
   onDownloadSvg,
   onCopySvg,
   copied,
-  stats
+  stats,
+  onClearImage
 }: NavbarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -116,6 +118,17 @@ export default function Navbar({
 
         {imageLoaded && (
           <>
+            {onClearImage && (
+              <button
+                className="btn"
+                onClick={onClearImage}
+                title="Close image and return to upload screen"
+              >
+                <X size={14} />
+                <span>Close</span>
+              </button>
+            )}
+
             <button
               className="btn"
               onClick={onCopySvg}

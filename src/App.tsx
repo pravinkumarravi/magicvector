@@ -120,10 +120,15 @@ export default function App() {
     img.src = src;
   }, [executeVectorization, options]);
 
-  // Load sample on mount
-  useEffect(() => {
-    loadImage('/samples/falcon_logo.jpg', 'falcon_logo');
-  }, []);
+  // Clear current image and return to upload DropZone screen
+  const handleClearImage = () => {
+    setImageSrc(null);
+    setRawImageData(null);
+    setSvgString('');
+    setWireframeSvg('');
+    setPalette([]);
+    setStats(null);
+  };
 
   // File Upload Handler
   const handleFileSelect = (file: File) => {
@@ -260,6 +265,7 @@ export default function App() {
         onCopySvg={handleCopySvg}
         copied={copied}
         stats={stats}
+        onClearImage={handleClearImage}
       />
 
       {/* Sub-toolbar */}
