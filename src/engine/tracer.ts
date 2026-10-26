@@ -76,18 +76,17 @@ export const PRESETS: Record<PresetKey, PresetConfig> = {
   },
   artwork: {
     name: 'Anti-aliased Artwork',
-    desc: 'Ultra-smooth Bézier curves for illustrations, drawings & comics',
+    desc: 'High-detail cubic Bézier curves for illustrations, drawings & comics (Vector Magic High)',
     icon: 'Palette',
     options: {
       numberofcolors: 16,
-      pathomit: 6,
-      ltres: 1.0,
-      qtres: 1.5,
+      pathomit: 2,
+      detailLevel: 'high',
+      blurradius: 0,
+      cornerThreshold: 50,
+      curveSmoothness: 0.5,
       rightangleenhance: false,
       linefilter: true,
-      blurradius: 2,
-      blurdelta: 20,
-      roundcoords: 2,
       layering: 0
     }
   },
@@ -258,9 +257,13 @@ export async function vectorizeImage(imageData: ImageData, userOptions: VectorOp
       removeBackground: !!options.removeBackground,
       bgColor: customBg,
       bgTolerance: options.bgTolerance || 25,
-      pathOmit: options.pathomit || 4,
+      pathOmit: options.pathomit !== undefined ? options.pathomit : 2,
       strokeMode: options.strokeMode || 'fill',
-      strokeWidth: options.strokeWidth || 1.5
+      strokeWidth: options.strokeWidth || 1.5,
+      detailLevel: options.detailLevel || 'high',
+      cornerThreshold: options.cornerThreshold || 0,
+      curveSmoothness: options.curveSmoothness !== undefined ? options.curveSmoothness : 0.0,
+      spliceThreshold: options.spliceThreshold || 0
     });
 
     if (wasmRes && wasmRes.svg) {

@@ -7,6 +7,7 @@ interface WasmExports {
   wasm_detect_background: (ptr: number, width: number, height: number, bgOutPtr: number) => void;
   wasm_remove_background: (ptr: number, len: number, tr: number, tg: number, tb: number, tol: number) => number;
   wasm_box_blur: (ptr: number, width: number, height: number, radius: number) => void;
+  wasm_clean_edges: (ptr: number, width: number, height: number, threshold: number) => void;
   wasm_free_string: (ptr: number, len: number) => void;
   wasm_vectorize: (
     ptr: number,
@@ -22,6 +23,10 @@ interface WasmExports {
     minPathLen: number,
     strokeMode: number,
     strokeWidth: number,
+    detailLevel: number,
+    cornerThreshold: number,
+    curveSmoothness: number,
+    spliceThreshold: number,
     outLenPtr: number
   ) => number;
 }
@@ -204,6 +209,10 @@ export function wasmVectorizeFull(
     pathOmit?: number;
     strokeMode?: 'fill' | 'stroke' | 'fill-stroke';
     strokeWidth?: number;
+    detailLevel?: 'low' | 'medium' | 'high';
+    cornerThreshold?: number;
+    curveSmoothness?: number;
+    spliceThreshold?: number;
   }
 ): WasmVectorizeResult | null {
   if (!wasmInstance) return null;
@@ -225,9 +234,14 @@ export function wasmVectorizeFull(
     const bgG = options.bgColor ? options.bgColor.g : 999;
     const bgB = options.bgColor ? options.bgColor.b : 999;
     const bgTol = options.bgTolerance || 25;
-    const minPathLen = options.pathOmit || 4;
+    const minPathLen = options.pathOmit !== undefined ? options.pathOmit : 2;
     const strokeModeVal = options.strokeMode === 'stroke' ? 1 : (options.strokeMode === 'fill-stroke' ? 2 : 0);
     const strokeWidthVal = options.strokeWidth || 1.5;
+
+    const detailLevelVal = options.detailLevel === 'high' ? 2 : (options.detailLevel === 'low' ? 0 : 1);
+    const cornerThresholdVal = options.cornerThreshold || 0;
+    const curveSmoothnessVal = options.curveSmoothness !== undefined ? options.curveSmoothness : 0.0;
+    const spliceThresholdVal = options.spliceThreshold || 0;
 
     const resultPtr = wasmInstance.wasm_vectorize(
       imgPtr,
@@ -243,6 +257,10 @@ export function wasmVectorizeFull(
       minPathLen,
       strokeModeVal,
       strokeWidthVal,
+      detailLevelVal,
+      cornerThresholdVal,
+      curveSmoothnessVal,
+      spliceThresholdVal,
       outLenPtr
     );
 

@@ -193,6 +193,78 @@ pub extern "C" fn wasm_box_blur(ptr: *mut u8, width: u32, height: u32, radius: u
     }
 }
 
+/// Snap anti-aliased edge transition pixels to prevent fuzzy halos along high-contrast outlines
+#[no_mangle]
+pub extern "C" fn wasm_clean_edges(ptr: *mut u8, width: u32, height: u32, threshold: u32) {
+    if ptr.is_null() || width < 3 || height < 3 {
+        return;
+    }
+
+    let w = width as usize;
+    let h = height as usize;
+    let pixels = unsafe { std::slice::from_raw_parts_mut(ptr, w * h * 4) };
+    let copy = pixels.to_vec();
+    let th = threshold as i64;
+
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let idx = (y * w + x) * 4;
+            let a = copy[idx + 3];
+            if a < 32 {
+                continue;
+            }
+
+            let r = copy[idx] as i64;
+            let g = copy[idx + 1] as i64;
+            let b = copy[idx + 2] as i64;
+            let lum = (r * 299 + g * 587 + b * 114) / 1000;
+
+            // Check if pixel is in a high-contrast boundary zone
+            let mut dark_neighbors = 0;
+            let mut light_neighbors = 0;
+            let mut closest_dark = (0u8, 0u8, 0u8);
+            let mut closest_light = (255u8, 255u8, 255u8);
+
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let n_idx = (((y as i32 + dy) as usize) * w + ((x as i32 + dx) as usize)) * 4;
+                    if copy[n_idx + 3] < 32 {
+                        continue;
+                    }
+                    let nr = copy[n_idx];
+                    let ng = copy[n_idx + 1];
+                    let nb = copy[n_idx + 2];
+                    let n_lum = (nr as i64 * 299 + ng as i64 * 587 + nb as i64 * 114) / 1000;
+
+                    if n_lum < 60 {
+                        dark_neighbors += 1;
+                        closest_dark = (nr, ng, nb);
+                    } else if n_lum > 160 {
+                        light_neighbors += 1;
+                        closest_light = (nr, ng, nb);
+                    }
+                }
+            }
+
+            // If this is an anti-aliased transition pixel between dark outline and light region
+            if dark_neighbors >= 2 && light_neighbors >= 2 {
+                if lum < 128 - th {
+                    pixels[idx] = closest_dark.0;
+                    pixels[idx + 1] = closest_dark.1;
+                    pixels[idx + 2] = closest_dark.2;
+                } else if lum > 128 + th {
+                    pixels[idx] = closest_light.0;
+                    pixels[idx + 1] = closest_light.1;
+                    pixels[idx + 2] = closest_light.2;
+                }
+            }
+        }
+    }
+}
+
 /// Master Vectorization Pipeline in Native Rust WebAssembly
 /// Utilizes the state-of-the-art `vtracer` / `visioncortex` curve-fitting framework:
 /// - True sub-pixel cubic Bézier curve fitting (`C` and `Q` splines)
@@ -214,6 +286,10 @@ pub extern "C" fn wasm_vectorize(
     min_path_len: u32,
     stroke_mode: u32,
     stroke_width: f32,
+    detail_level: u32,     // 0 = Low, 1 = Medium, 2 = High
+    corner_threshold: u32, // 0 = auto (from detail_level), or explicit degrees e.g. 30..90
+    curve_smoothness: f32, // 0.0 = auto, or explicit e.g. 0.1..5.0
+    splice_threshold: u32, // 0 = auto, or explicit e.g. 20..70
     out_len: *mut usize,
 ) -> *mut u8 {
     if ptr.is_null() || out_len.is_null() || width == 0 || height == 0 {
@@ -245,19 +321,48 @@ pub extern "C" fn wasm_vectorize(
         wasm_box_blur(ptr, width, height, blur_radius);
     }
 
-    // 4. Build VTracer Config matching Vector Magic's "Anti-aliased artwork, High"
+    // 4. Build VTracer Config dynamically matching Detail Level (Vector Magic High / Med / Low)
     let mut cfg = Config::from_preset(Preset::Poster);
     cfg.hierarchical = Hierarchical::Stacked;
     cfg.mode = FitMode::Spline;
-    cfg.filter_speckle = std::cmp::max(2, min_path_len as usize);
-    cfg.color_precision = 8;
-    cfg.layer_difference = 16;
-    cfg.corner_threshold = 60;
-    cfg.length_threshold = 3.5;
-    cfg.max_iterations = 10;
-    cfg.splice_threshold = 45;
-    cfg.simplify = Some(1.0); // Paper.js style continuous Bézier curve smoothing
     cfg.path_precision = Some(2);
+
+    match detail_level {
+        2 => {
+            // High Detail: Vector Magic "Anti-aliased artwork, High"
+            // Preserves small facial features, finger separations, and sharp cusps
+            cfg.filter_speckle = std::cmp::max(2, min_path_len as usize);
+            cfg.color_precision = 8;
+            cfg.layer_difference = 14;
+            cfg.corner_threshold = if corner_threshold > 0 { corner_threshold as i32 } else { 50 };
+            cfg.length_threshold = 2.0;
+            cfg.max_iterations = 12;
+            cfg.splice_threshold = if splice_threshold > 0 { splice_threshold as i32 } else { 40 };
+            cfg.simplify = if curve_smoothness > 0.0 { Some(curve_smoothness as f64) } else { Some(0.5) };
+        }
+        0 => {
+            // Low Detail: Maximum simplification, large clean shapes
+            cfg.filter_speckle = std::cmp::max(8, min_path_len as usize);
+            cfg.color_precision = 6;
+            cfg.layer_difference = 22;
+            cfg.corner_threshold = if corner_threshold > 0 { corner_threshold as i32 } else { 75 };
+            cfg.length_threshold = 5.5;
+            cfg.max_iterations = 8;
+            cfg.splice_threshold = if splice_threshold > 0 { splice_threshold as i32 } else { 55 };
+            cfg.simplify = if curve_smoothness > 0.0 { Some(curve_smoothness as f64) } else { Some(1.8) };
+        }
+        _ => {
+            // Medium Detail (Default): Balanced smooth curves & detail
+            cfg.filter_speckle = std::cmp::max(4, min_path_len as usize);
+            cfg.color_precision = 7;
+            cfg.layer_difference = 16;
+            cfg.corner_threshold = if corner_threshold > 0 { corner_threshold as i32 } else { 60 };
+            cfg.length_threshold = 3.5;
+            cfg.max_iterations = 10;
+            cfg.splice_threshold = if splice_threshold > 0 { splice_threshold as i32 } else { 45 };
+            cfg.simplify = if curve_smoothness > 0.0 { Some(curve_smoothness as f64) } else { Some(1.0) };
+        }
+    }
 
     if num_colors > 1 && num_colors <= 64 {
         cfg.max_colors = Some(num_colors as usize);
@@ -294,10 +399,10 @@ pub extern "C" fn wasm_vectorize(
     let sw = if stroke_width > 0.1 { stroke_width } else { 1.5 };
     if stroke_mode == 1 {
         // Single Stroke Mode: transform filled paths to clean single stroke outlines
-        svg_string = svg_string.replace(r#"fill=""#, r#"fill="none" stroke=""#);
+        svg_string = svg_string.replace("fill=\"", "fill=\"none\" stroke=\"");
         svg_string = svg_string.replace(
             "<path ",
-            &format!(r#"<path stroke-width="{:.1}" stroke-linecap="round" stroke-linejoin="round" "#, sw),
+            &format!("<path stroke-width=\"{:.1}\" stroke-linecap=\"round\" stroke-linejoin=\"round\" ", sw),
         );
     }
 
@@ -424,3 +529,104 @@ fn serde_json_escape(s: &str) -> String {
     out.push('"');
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_memory_allocation() {
+        let ptr = alloc(128);
+        assert!(!ptr.is_null());
+        dealloc(ptr, 128);
+    }
+
+    #[test]
+    fn test_parse_hex() {
+        assert_eq!(parse_hex_or_rgb("#ff0000"), (255, 0, 0));
+        assert_eq!(parse_hex_or_rgb("#00ff00"), (0, 255, 0));
+        assert_eq!(parse_hex_or_rgb("#0000ff"), (0, 0, 255));
+    }
+
+    #[test]
+    fn test_serde_escape() {
+        let escaped = serde_json_escape("hello \"world\"\nnext");
+        assert_eq!(escaped, "\"hello \\\"world\\\"\\nnext\"");
+    }
+
+    #[test]
+    fn test_detect_background() {
+        // 10x10 white image
+        let mut pixels = vec![255u8; 10 * 10 * 4];
+        let mut bg_out = [0u8; 4];
+        wasm_detect_background(pixels.as_mut_ptr(), 10, 10, bg_out.as_mut_ptr());
+        assert_eq!(bg_out[0], 255);
+        assert_eq!(bg_out[1], 255);
+        assert_eq!(bg_out[2], 255);
+    }
+
+    #[test]
+    fn test_remove_background() {
+        // 2x2 image: 3 white pixels, 1 red pixel
+        let mut pixels = vec![
+            255, 255, 255, 255, // white
+            255, 255, 255, 255, // white
+            255, 255, 255, 255, // white
+            255, 0, 0, 255,     // red
+        ];
+        let removed = wasm_remove_background(pixels.as_mut_ptr(), pixels.len(), 255, 255, 255, 10);
+        assert_eq!(removed, 3);
+        assert_eq!(pixels[3], 0);  // first white pixel alpha is 0
+        assert_eq!(pixels[15], 255); // red pixel alpha remains 255
+    }
+
+    #[test]
+    fn test_wasm_vectorize_high_detail() {
+        let width = 50u32;
+        let height = 50u32;
+        let mut pixels = vec![255u8; (width * height * 4) as usize];
+
+        // Draw dark square inside
+        for y in 10..40 {
+            for x in 10..40 {
+                let idx = ((y * width + x) * 4) as usize;
+                pixels[idx] = 30;
+                pixels[idx + 1] = 30;
+                pixels[idx + 2] = 30;
+            }
+        }
+
+        let mut out_len = 0usize;
+        let res_ptr = wasm_vectorize(
+            pixels.as_mut_ptr(),
+            width,
+            height,
+            4,
+            0,
+            0,
+            999, 999, 999,
+            25,
+            2,
+            0,
+            1.5,
+            2, // High detail
+            50,
+            0.5,
+            40,
+            &mut out_len,
+        );
+
+        assert!(!res_ptr.is_null());
+        assert!(out_len > 0);
+
+        let json_str = unsafe {
+            let slice = std::slice::from_raw_parts(res_ptr, out_len);
+            std::str::from_utf8(slice).unwrap().to_string()
+        };
+
+        assert!(json_str.contains("\"svg\":"));
+        assert!(json_str.contains("<path"));
+        wasm_free_string(res_ptr, out_len);
+    }
+}
+

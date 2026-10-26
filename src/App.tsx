@@ -74,7 +74,8 @@ export default function App() {
 
     img.onload = () => {
       try {
-        const maxDim = 1200;
+        // Preserve native resolution up to 4K (4096px) to avoid bilinear resampling blur on fine details
+        const maxDim = 4096;
         let w = img.naturalWidth || img.width;
         let h = img.naturalHeight || img.height;
 

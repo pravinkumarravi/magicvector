@@ -42,6 +42,11 @@ export interface VectorOptions {
   pal?: RgbColor[];
   strokeMode?: 'fill' | 'stroke' | 'fill-stroke';
   strokeWidth?: number;
+  detailLevel?: 'low' | 'medium' | 'high';
+  cornerThreshold?: number;
+  curveSmoothness?: number;
+  spliceThreshold?: number;
+  colorMode?: 'auto' | 'limited' | 'custom';
   [key: string]: any;
 }
 

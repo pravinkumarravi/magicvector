@@ -156,7 +156,34 @@ export default function Sidebar({
 
           {/* Precision & Detail Sliders */}
           <div className="sidebar-section">
-            <div className="section-label">Detail & Curve Fitting</div>
+            <div className="section-label">Detail Level (Vector Magic Quality)</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.35rem', marginBottom: '0.85rem' }}>
+              {(['low', 'medium', 'high'] as const).map((lvl) => (
+                <button
+                  key={lvl}
+                  className={`btn ${(options.detailLevel || 'high') === lvl ? 'btn-primary' : ''}`}
+                  style={{
+                    justifyContent: 'center',
+                    fontSize: '0.75rem',
+                    padding: '0.45rem 0.5rem',
+                    textTransform: 'capitalize'
+                  }}
+                  onClick={() => {
+                    const newOpts: VectorOptions = {
+                      ...options,
+                      detailLevel: lvl,
+                      pathomit: lvl === 'high' ? 2 : (lvl === 'medium' ? 4 : 8),
+                      curveSmoothness: lvl === 'high' ? 0.5 : (lvl === 'medium' ? 1.0 : 1.8),
+                      cornerThreshold: lvl === 'high' ? 50 : (lvl === 'medium' ? 60 : 75)
+                    };
+                    setOptions(newOpts);
+                    onRetrace(newOpts);
+                  }}
+                >
+                  {lvl}
+                </button>
+              ))}
+            </div>
 
             {/* Color Count Slider */}
             <div className="control-row">
@@ -174,19 +201,51 @@ export default function Sidebar({
               />
             </div>
 
-            {/* Noise / Speckle Filter */}
+            {/* Small Detail & Noise Filter */}
             <div className="control-row">
               <div className="control-header">
-                <span className="control-name">Noise / Speckle Filter</span>
-                <span className="control-value">{options.pathomit || 0} px</span>
+                <span className="control-name">Speckle / Detail Suppression</span>
+                <span className="control-value">{options.pathomit !== undefined ? options.pathomit : 2} px</span>
               </div>
               <input
                 type="range"
                 min="0"
-                max="32"
+                max="16"
                 step="1"
-                value={options.pathomit || 0}
+                value={options.pathomit !== undefined ? options.pathomit : 2}
                 onChange={(e) => setOptions(prev => ({ ...prev, pathomit: parseInt(e.target.value) }))}
+              />
+            </div>
+
+            {/* Curve Smoothness (Paper.js / vtracer simplify) */}
+            <div className="control-row">
+              <div className="control-header">
+                <span className="control-name">Curve Smoothness</span>
+                <span className="control-value">{(options.curveSmoothness !== undefined ? options.curveSmoothness : 0.5).toFixed(1)}</span>
+              </div>
+              <input
+                type="range"
+                min="0.1"
+                max="3.0"
+                step="0.1"
+                value={options.curveSmoothness !== undefined ? options.curveSmoothness : 0.5}
+                onChange={(e) => setOptions(prev => ({ ...prev, curveSmoothness: parseFloat(e.target.value) }))}
+              />
+            </div>
+
+            {/* Corner Angle Threshold */}
+            <div className="control-row">
+              <div className="control-header">
+                <span className="control-name">Corner Sharpness Angle</span>
+                <span className="control-value">{options.cornerThreshold || 50}°</span>
+              </div>
+              <input
+                type="range"
+                min="30"
+                max="90"
+                step="5"
+                value={options.cornerThreshold || 50}
+                onChange={(e) => setOptions(prev => ({ ...prev, cornerThreshold: parseInt(e.target.value) }))}
               />
             </div>
 
