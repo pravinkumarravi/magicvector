@@ -351,22 +351,29 @@ export default function Sidebar({
               </button>
             </div>
 
-            {options.strokeMode === 'stroke' && (
-              <div className="control-row">
-                <div className="control-header">
-                  <span className="control-name">Stroke Line Width</span>
-                  <span className="control-value">{(options.strokeWidth || 1.5).toFixed(1)} px</span>
+            {(options.strokeMode || 'fill-stroke') !== 'fill' && (() => {
+              const isWire = options.strokeMode === 'stroke';
+              const def = isWire ? 1.5 : 0.5;
+              const val = options.strokeWidth ?? def;
+              return (
+                <div className="control-row">
+                  <div className="control-header">
+                    <span className="control-name">Stroke Width</span>
+                    <span className="control-value">{val.toFixed(2)} px</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={isWire ? 0.5 : 0}
+                    max={isWire ? 6 : 4}
+                    step="0.25"
+                    value={val}
+                    onChange={(e) =>
+                      setOptions(prev => ({ ...prev, strokeWidth: parseFloat(e.target.value) }))
+                    }
+                  />
                 </div>
-                <input
-                  type="range"
-                  min="0.5"
-                  max="6"
-                  step="0.25"
-                  value={options.strokeWidth || 1.5}
-                  onChange={(e) => setOptions(prev => ({ ...prev, strokeWidth: parseFloat(e.target.value) }))}
-                />
-              </div>
-            )}
+              );
+            })()}
           </div>
 
           {/* Background Removal */}

@@ -2,6 +2,30 @@ use std::alloc::{alloc as sys_alloc, dealloc as sys_dealloc, Layout};
 use std::collections::HashMap;
 use vtracer::{ColorImage, Config, FitMode, Hierarchical, Preset};
 
+// ---------------------------------------------------------------------------
+// Tunables
+// ---------------------------------------------------------------------------
+
+/// Small images are upscaled (Catmull-Rom) so the *longest side* is about this
+/// many pixels BEFORE color quantization + tracing. This is the biggest fix for
+/// "staircase" edges and non-round circles: vtracer fits curves to pixel
+/// boundaries, so more (sub)pixels = smoother curves.
+/// Lower it (e.g. 1600) if tracing feels slow, raise it for even smoother output.
+const TARGET_LONG_SIDE: usize = 2400;
+
+/// Never upscale by more than this factor.
+const MAX_UPSCALE: usize = 4;
+
+/// Replace small, solid, round blobs (eyes, dots, buttons) with perfect circles.
+const SNAP_CIRCLES: bool = true;
+
+/// Safety cap on the number of snapped circles.
+const MAX_SNAPPED_CIRCLES: usize = 400;
+
+// ---------------------------------------------------------------------------
+// WebAssembly memory helpers
+// ---------------------------------------------------------------------------
+
 /// Allocate memory buffer inside WebAssembly linear memory
 #[no_mangle]
 pub extern "C" fn alloc(size: usize) -> *mut u8 {
@@ -23,6 +47,10 @@ pub extern "C" fn dealloc(ptr: *mut u8, size: usize) {
 pub extern "C" fn wasm_free_string(ptr: *mut u8, len: usize) {
     dealloc(ptr, len);
 }
+
+// ---------------------------------------------------------------------------
+// Background detection / removal
+// ---------------------------------------------------------------------------
 
 /// Detect dominant background color by perimeter mode (most frequent border color)
 #[no_mangle]
@@ -126,6 +154,10 @@ pub extern "C" fn wasm_remove_background(
     removed_count
 }
 
+// ---------------------------------------------------------------------------
+// Blur
+// ---------------------------------------------------------------------------
+
 /// 2D separable box blur filter
 #[no_mangle]
 pub extern "C" fn wasm_box_blur(ptr: *mut u8, width: u32, height: u32, radius: u32) {
@@ -200,6 +232,99 @@ pub extern "C" fn wasm_box_blur(ptr: *mut u8, width: u32, height: u32, radius: u
     }
 }
 
+// ---------------------------------------------------------------------------
+// Upscaling (Catmull-Rom bicubic, alpha-aware)
+// ---------------------------------------------------------------------------
+
+fn catmull_rom_weights(t: f32) -> [f32; 4] {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    [
+        -0.5 * t3 + t2 - 0.5 * t,
+        1.5 * t3 - 2.5 * t2 + 1.0,
+        -1.5 * t3 + 2.0 * t2 + 0.5 * t,
+        0.5 * t3 - 0.5 * t2,
+    ]
+}
+
+/// For every output coordinate: the 4 source indices and their weights.
+fn build_taps(out_len: usize, in_len: usize, scale: usize) -> Vec<([usize; 4], [f32; 4])> {
+    let mut taps = Vec::with_capacity(out_len);
+    let s = scale as f32;
+    let max_i = in_len as i32 - 1;
+    for o in 0..out_len {
+        let src = (o as f32 + 0.5) / s - 0.5;
+        let base_f = src.floor();
+        let t = src - base_f;
+        let base = base_f as i32;
+        let wts = catmull_rom_weights(t);
+        let mut idx = [0usize; 4];
+        for k in 0..4 {
+            let i = base - 1 + k as i32;
+            idx[k] = i.clamp(0, max_i) as usize;
+        }
+        taps.push((idx, wts));
+    }
+    taps
+}
+
+/// Smoothly upscale an RGBA8 image by an integer factor.
+/// Uses premultiplied alpha so transparent edges do not bleed color.
+fn upscale_catmull_rom(src: &[u8], w: usize, h: usize, scale: usize) -> Vec<u8> {
+    let ow = w * scale;
+    let oh = h * scale;
+    let xt = build_taps(ow, w, scale);
+    let yt = build_taps(oh, h, scale);
+
+    // Horizontal pass -> f32 premultiplied buffer (ow x h)
+    let mut tmp = vec![0f32; ow * h * 4];
+    for y in 0..h {
+        let row = y * w * 4;
+        for (ox, (idx, wt)) in xt.iter().enumerate() {
+            let mut acc = [0f32; 4];
+            for k in 0..4 {
+                let p = row + idx[k] * 4;
+                let a = src[p + 3] as f32;
+                let af = a / 255.0;
+                acc[0] += wt[k] * src[p] as f32 * af;
+                acc[1] += wt[k] * src[p + 1] as f32 * af;
+                acc[2] += wt[k] * src[p + 2] as f32 * af;
+                acc[3] += wt[k] * a;
+            }
+            let o = (y * ow + ox) * 4;
+            tmp[o..o + 4].copy_from_slice(&acc);
+        }
+    }
+
+    // Vertical pass -> u8 straight alpha
+    let mut out = vec![0u8; ow * oh * 4];
+    for (oy, (idx, wt)) in yt.iter().enumerate() {
+        for ox in 0..ow {
+            let mut acc = [0f32; 4];
+            for k in 0..4 {
+                let p = (idx[k] * ow + ox) * 4;
+                for c in 0..4 {
+                    acc[c] += wt[k] * tmp[p + c];
+                }
+            }
+            let a = acc[3].clamp(0.0, 255.0);
+            let o = (oy * ow + ox) * 4;
+            if a >= 0.5 {
+                let inv = 255.0 / a;
+                out[o] = (acc[0] * inv).round().clamp(0.0, 255.0) as u8;
+                out[o + 1] = (acc[1] * inv).round().clamp(0.0, 255.0) as u8;
+                out[o + 2] = (acc[2] * inv).round().clamp(0.0, 255.0) as u8;
+                out[o + 3] = a.round() as u8;
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Color quantization
+// ---------------------------------------------------------------------------
+
 /// Perceptually weighted color distance squared (accounting for human eye sensitivity to green > red > blue)
 #[inline(always)]
 fn color_dist_sq(r1: u8, g1: u8, b1: u8, r2: u8, g2: u8, b2: u8) -> u64 {
@@ -209,8 +334,19 @@ fn color_dist_sq(r1: u8, g1: u8, b1: u8, r2: u8, g2: u8, b2: u8) -> u64 {
     (2 * dr * dr + 4 * dg * dg + 3 * db * db) as u64
 }
 
-/// Quantize pixels to dominant perceptual color clusters with anti-aliasing halo suppression
-pub fn quantize_palette_perceptual(pixels: &mut [u8], width: usize, height: usize, k: usize) -> Vec<(u8, u8, u8)> {
+/// Quantize pixels to dominant perceptual color clusters with anti-aliasing halo suppression.
+///
+/// `isolation` controls the final boundary-majority filter: a pixel is replaced only if it has
+/// `<= isolation` same-colored neighbors. Use 1 for native-resolution images and 0 for upscaled
+/// images (where only truly isolated noise pixels should be removed, so small round shapes keep
+/// their outline).
+pub fn quantize_palette_perceptual(
+    pixels: &mut [u8],
+    width: usize,
+    height: usize,
+    k: usize,
+    isolation: usize,
+) -> Vec<(u8, u8, u8)> {
     if k == 0 || pixels.is_empty() {
         return Vec::new();
     }
@@ -353,68 +489,73 @@ pub fn quantize_palette_perceptual(pixels: &mut [u8], width: usize, height: usiz
         pixels[idx + 2] = centers[best_c].2;
     }
 
-    // 4. Boundary Majority Filter Pass (eliminates 1-pixel halo transition fringes)
-    let copy = pixels.to_vec();
-    for y in 1..height - 1 {
-        for x in 1..width - 1 {
-            let idx = (y * width + x) * 4;
-            if copy[idx + 3] < 32 {
-                continue;
-            }
-            let cur_r = copy[idx];
-            let cur_g = copy[idx + 1];
-            let cur_b = copy[idx + 2];
+    // 4. Boundary Majority Filter Pass (eliminates halo transition fringes / isolated noise pixels)
+    if width >= 3 && height >= 3 {
+        let copy = pixels.to_vec();
+        for y in 1..height - 1 {
+            for x in 1..width - 1 {
+                let idx = (y * width + x) * 4;
+                if copy[idx + 3] < 32 {
+                    continue;
+                }
+                let cur_r = copy[idx];
+                let cur_g = copy[idx + 1];
+                let cur_b = copy[idx + 2];
 
-            let mut same_count = 0;
-            let mut neighbor_counts: [(u8, u8, u8, u32); 8] = [(0, 0, 0, 0); 8];
-            let mut unique_neighbors = 0;
+                let mut same_count = 0usize;
+                let mut neighbor_counts: [(u8, u8, u8, u32); 8] = [(0, 0, 0, 0); 8];
+                let mut unique_neighbors = 0;
 
-            for dy in -1i32..=1 {
-                for dx in -1i32..=1 {
-                    if dx == 0 && dy == 0 {
-                        continue;
-                    }
-                    let n_idx = (((y as i32 + dy) as usize) * width + ((x as i32 + dx) as usize)) * 4;
-                    if copy[n_idx + 3] < 32 {
-                        continue;
-                    }
-                    let nr = copy[n_idx];
-                    let ng = copy[n_idx + 1];
-                    let nb = copy[n_idx + 2];
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        let n_idx =
+                            (((y as i32 + dy) as usize) * width + ((x as i32 + dx) as usize)) * 4;
+                        if copy[n_idx + 3] < 32 {
+                            continue;
+                        }
+                        let nr = copy[n_idx];
+                        let ng = copy[n_idx + 1];
+                        let nb = copy[n_idx + 2];
 
-                    if nr == cur_r && ng == cur_g && nb == cur_b {
-                        same_count += 1;
-                    } else {
-                        let mut found = false;
-                        for i in 0..unique_neighbors {
-                            if neighbor_counts[i].0 == nr && neighbor_counts[i].1 == ng && neighbor_counts[i].2 == nb {
-                                neighbor_counts[i].3 += 1;
-                                found = true;
-                                break;
+                        if nr == cur_r && ng == cur_g && nb == cur_b {
+                            same_count += 1;
+                        } else {
+                            let mut found = false;
+                            for i in 0..unique_neighbors {
+                                if neighbor_counts[i].0 == nr
+                                    && neighbor_counts[i].1 == ng
+                                    && neighbor_counts[i].2 == nb
+                                {
+                                    neighbor_counts[i].3 += 1;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found && unique_neighbors < 8 {
+                                neighbor_counts[unique_neighbors] = (nr, ng, nb, 1);
+                                unique_neighbors += 1;
                             }
                         }
-                        if !found && unique_neighbors < 8 {
-                            neighbor_counts[unique_neighbors] = (nr, ng, nb, 1);
-                            unique_neighbors += 1;
+                    }
+                }
+
+                if same_count <= isolation && unique_neighbors > 0 {
+                    let mut max_n_count = 0;
+                    let mut best_n = (cur_r, cur_g, cur_b);
+                    for i in 0..unique_neighbors {
+                        if neighbor_counts[i].3 > max_n_count {
+                            max_n_count = neighbor_counts[i].3;
+                            best_n = (neighbor_counts[i].0, neighbor_counts[i].1, neighbor_counts[i].2);
                         }
                     }
-                }
-            }
-
-            // If current pixel has <= 1 neighbor with the same color, it's a boundary halo sliver
-            if same_count <= 1 && unique_neighbors > 0 {
-                let mut max_n_count = 0;
-                let mut best_n = (cur_r, cur_g, cur_b);
-                for i in 0..unique_neighbors {
-                    if neighbor_counts[i].3 > max_n_count {
-                        max_n_count = neighbor_counts[i].3;
-                        best_n = (neighbor_counts[i].0, neighbor_counts[i].1, neighbor_counts[i].2);
+                    if max_n_count >= 3 {
+                        pixels[idx] = best_n.0;
+                        pixels[idx + 1] = best_n.1;
+                        pixels[idx + 2] = best_n.2;
                     }
-                }
-                if max_n_count >= 3 {
-                    pixels[idx] = best_n.0;
-                    pixels[idx + 1] = best_n.1;
-                    pixels[idx + 2] = best_n.2;
                 }
             }
         }
@@ -493,12 +634,295 @@ pub extern "C" fn wasm_clean_edges(ptr: *mut u8, width: u32, height: u32, thresh
     }
 }
 
+// ---------------------------------------------------------------------------
+// Circle snapping (eyes, dots, buttons -> perfect circles)
+// ---------------------------------------------------------------------------
+
+struct SnappedCircle {
+    cx: f32,
+    cy: f32,
+    r: f32,
+    rgb: (u8, u8, u8),
+}
+
+/// Finds small, solid, round, single-color blobs in the QUANTIZED image, erases them from the
+/// bitmap (filling with the dominant surrounding color so the tracer does not draw them) and
+/// returns them as exact circles. They are re-added to the SVG as `<path>` arcs afterwards.
+///
+/// Conservative on purpose: a blob only qualifies if it
+///   - does not touch the image border,
+///   - is between 4px and 10% of the image (in original-pixel terms) across,
+///   - has an aspect ratio near 1:1,
+///   - fills ~78.5% (pi/4) of its bounding box (so it has no holes and is not a square/diamond).
+/// Blobs that merge with other same-colored regions (e.g. an eye touching a black outline) or
+/// contain a highlight are left to the normal tracer.
+fn snap_circles(pixels: &mut [u8], w: usize, h: usize, scale: usize) -> Vec<SnappedCircle> {
+    let mut circles: Vec<SnappedCircle> = Vec::new();
+    let total = w * h;
+    if total == 0 {
+        return circles;
+    }
+
+    let max_diam = ((w.min(h) as f32) * 0.10) as usize;
+    let min_diam = 4 * scale;
+    if max_diam <= min_diam {
+        return circles;
+    }
+    let max_store = max_diam * max_diam;
+
+    let mut visited = vec![false; total];
+    let mut stack: Vec<usize> = Vec::new();
+
+    for start in 0..total {
+        if visited[start] {
+            continue;
+        }
+        let si = start * 4;
+        if pixels[si + 3] < 32 {
+            visited[start] = true;
+            continue;
+        }
+        let (cr, cg, cb) = (pixels[si], pixels[si + 1], pixels[si + 2]);
+
+        let mut members: Vec<usize> = Vec::new();
+        let mut too_big = false;
+        let mut area = 0usize;
+        let (mut min_x, mut max_x, mut min_y, mut max_y) = (usize::MAX, 0usize, usize::MAX, 0usize);
+        let (mut sum_x, mut sum_y) = (0f64, 0f64);
+
+        visited[start] = true;
+        stack.push(start);
+        while let Some(p) = stack.pop() {
+            let x = p % w;
+            let y = p / w;
+            area += 1;
+            sum_x += x as f64;
+            sum_y += y as f64;
+            if x < min_x {
+                min_x = x;
+            }
+            if x > max_x {
+                max_x = x;
+            }
+            if y < min_y {
+                min_y = y;
+            }
+            if y > max_y {
+                max_y = y;
+            }
+            if !too_big {
+                if members.len() < max_store {
+                    members.push(p);
+                } else {
+                    too_big = true;
+                    members.clear();
+                }
+            }
+
+            let mut nb = [usize::MAX; 4];
+            if x > 0 {
+                nb[0] = p - 1;
+            }
+            if x + 1 < w {
+                nb[1] = p + 1;
+            }
+            if y > 0 {
+                nb[2] = p - w;
+            }
+            if y + 1 < h {
+                nb[3] = p + w;
+            }
+            for &q in &nb {
+                if q == usize::MAX || visited[q] {
+                    continue;
+                }
+                let qi = q * 4;
+                if pixels[qi + 3] >= 32
+                    && pixels[qi] == cr
+                    && pixels[qi + 1] == cg
+                    && pixels[qi + 2] == cb
+                {
+                    visited[q] = true;
+                    stack.push(q);
+                }
+            }
+        }
+
+        if too_big || circles.len() >= MAX_SNAPPED_CIRCLES {
+            continue;
+        }
+        if min_x == 0 || min_y == 0 || max_x + 1 == w || max_y + 1 == h {
+            continue;
+        }
+
+        let bw = max_x - min_x + 1;
+        let bh = max_y - min_y + 1;
+        if bw < min_diam || bh < min_diam || bw > max_diam || bh > max_diam {
+            continue;
+        }
+        let aspect = bw as f32 / bh as f32;
+        if !(0.85..=1.18).contains(&aspect) {
+            continue;
+        }
+        let fill = area as f32 / (bw * bh) as f32;
+        if !(0.65..=0.85).contains(&fill) {
+            continue;
+        }
+
+        // Pick the most common neighboring color to paint over the blob.
+        let mut counts: Vec<((u8, u8, u8), u32)> = Vec::new();
+        for &p in &members {
+            let x = p % w;
+            let y = p / w;
+            let mut nb = [usize::MAX; 4];
+            if x > 0 {
+                nb[0] = p - 1;
+            }
+            if x + 1 < w {
+                nb[1] = p + 1;
+            }
+            if y > 0 {
+                nb[2] = p - w;
+            }
+            if y + 1 < h {
+                nb[3] = p + w;
+            }
+            for &q in &nb {
+                if q == usize::MAX {
+                    continue;
+                }
+                let qi = q * 4;
+                if pixels[qi + 3] < 32 {
+                    continue;
+                }
+                let col = (pixels[qi], pixels[qi + 1], pixels[qi + 2]);
+                if col == (cr, cg, cb) {
+                    continue; // inside the blob
+                }
+                if let Some(e) = counts.iter_mut().find(|e| e.0 == col) {
+                    e.1 += 1;
+                } else {
+                    counts.push((col, 1));
+                }
+            }
+        }
+        let fill_col = counts.iter().max_by_key(|e| e.1).map(|e| e.0);
+
+        for &p in &members {
+            let pi = p * 4;
+            match fill_col {
+                Some((r, g, b)) => {
+                    pixels[pi] = r;
+                    pixels[pi + 1] = g;
+                    pixels[pi + 2] = b;
+                }
+                None => pixels[pi + 3] = 0,
+            }
+        }
+
+        circles.push(SnappedCircle {
+            cx: (sum_x / area as f64) as f32 + 0.5,
+            cy: (sum_y / area as f64) as f32 + 0.5,
+            r: ((area as f32) / std::f32::consts::PI).sqrt(),
+            rgb: (cr, cg, cb),
+        });
+    }
+
+    circles
+}
+
+/// Detect whether vtracer prints hex colors upper- or lower-case, so snapped circles use the
+/// same spelling (keeps the palette / color toggles in the UI consistent).
+fn svg_uses_uppercase_hex(svg: &str) -> bool {
+    for (pos, _) in svg.match_indices("fill=\"#") {
+        for c in svg[pos + 7..].chars().take(6) {
+            if c.is_ascii_uppercase() {
+                return true;
+            }
+            if c.is_ascii_lowercase() {
+                return false;
+            }
+        }
+    }
+    false
+}
+
+/// Append circles as `<path>` arcs (not `<circle>`), so all existing JS code that filters / recolors
+/// `<path fill="...">` elements keeps working unchanged.
+fn append_circles(svg: String, circles: &[SnappedCircle]) -> String {
+    if circles.is_empty() {
+        return svg;
+    }
+    let upper = svg_uses_uppercase_hex(&svg);
+    let mut markup = String::new();
+    for c in circles {
+        let hex = if upper {
+            format!("#{:02X}{:02X}{:02X}", c.rgb.0, c.rgb.1, c.rgb.2)
+        } else {
+            format!("#{:02x}{:02x}{:02x}", c.rgb.0, c.rgb.1, c.rgb.2)
+        };
+        let d = c.r * 2.0;
+        markup.push_str(&format!(
+            "<path d=\"M{:.2},{:.2} a{:.2},{:.2} 0 1,0 {:.2},0 a{:.2},{:.2} 0 1,0 -{:.2},0 Z\" fill=\"{}\"/>\n",
+            c.cx - c.r,
+            c.cy,
+            c.r,
+            c.r,
+            d,
+            c.r,
+            c.r,
+            d,
+            hex
+        ));
+    }
+
+    match svg.rfind("</svg>") {
+        Some(pos) => {
+            let mut out = String::with_capacity(svg.len() + markup.len() + 1);
+            out.push_str(&svg[..pos]);
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&markup);
+            out.push_str(&svg[pos..]);
+            out
+        }
+        None => svg,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Border cleanup helper
+// ---------------------------------------------------------------------------
+
+#[inline]
+fn snap_px_to_bg(pixels: &mut [u8], idx: usize, bg: (u8, u8, u8), tol_sq: u64) {
+    if pixels[idx + 3] > 32 {
+        let d = color_dist_sq(pixels[idx], pixels[idx + 1], pixels[idx + 2], bg.0, bg.1, bg.2);
+        if d <= tol_sq {
+            pixels[idx] = bg.0;
+            pixels[idx + 1] = bg.1;
+            pixels[idx + 2] = bg.2;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Master pipeline
+// ---------------------------------------------------------------------------
+
 /// Master Vectorization Pipeline in Native Rust WebAssembly
-/// Utilizes the state-of-the-art `vtracer` / `visioncortex` curve-fitting framework:
-/// - True sub-pixel cubic Bézier curve fitting (`C` and `Q` splines)
-/// - Exact hierarchical color clustering matching Vector Magic's "Anti-aliased artwork, High"
-/// - Single, crisp, uniform black strokes matching the original bitmap line thickness exactly
-/// - Clean full-bleed edge-to-edge canvas background
+///
+/// What changed compared to the old version (all to get smooth lines and round circles):
+///  1. The bitmap is upscaled (Catmull-Rom) BEFORE quantization/tracing. Anti-aliased edge pixels,
+///     once snapped to the nearest palette color at high resolution, give sub-pixel accurate edges,
+///     so vtracer fits real curves instead of pixel staircases.
+///  2. Destructive preprocessing (clean_edges + 1-neighbor majority filter) is skipped / softened
+///     when upscaling, so tiny shapes like eyes are not eaten or made lumpy.
+///  3. Pixel-based tracer thresholds are scaled with the upscale factor.
+///  4. Small solid round blobs are replaced by mathematically perfect circles.
+///  5. The SVG viewBox is in upscaled coordinates; it still scales to any size, and stats still
+///     report the ORIGINAL image width/height.
 #[no_mangle]
 pub extern "C" fn wasm_vectorize(
     ptr: *mut u8,
@@ -524,92 +948,115 @@ pub extern "C" fn wasm_vectorize(
         return std::ptr::null_mut();
     }
 
-    let w = width as usize;
-    let h = height as usize;
-    let total_pixels = w * h;
-    let pixels = unsafe { std::slice::from_raw_parts_mut(ptr, total_pixels * 4) };
+    // ---- 0. Upscale for smooth curve fitting -------------------------------------------------
+    let src_w = width as usize;
+    let src_h = height as usize;
+    let long_side = src_w.max(src_h);
+    let scale = (TARGET_LONG_SIDE / long_side).clamp(1, MAX_UPSCALE);
+    let sf = scale as f64;
 
-    // 1. Detect Background Color
+    let mut upscaled: Vec<u8> = if scale > 1 {
+        let src = unsafe { std::slice::from_raw_parts(ptr as *const u8, src_w * src_h * 4) };
+        upscale_catmull_rom(src, src_w, src_h, scale)
+    } else {
+        Vec::new()
+    };
+    let work_ptr: *mut u8 = if scale > 1 { upscaled.as_mut_ptr() } else { ptr };
+
+    // Working (possibly upscaled) dimensions
+    let w = src_w * scale;
+    let h = src_h * scale;
+    let w32 = w as u32;
+    let h32 = h as u32;
+    let total_pixels = w * h;
+
+    // ---- 1. Detect background color ---------------------------------------------------------
     let mut bg_buf = [255u8; 4];
-    wasm_detect_background(ptr, width, height, bg_buf.as_mut_ptr());
+    wasm_detect_background(work_ptr, w32, h32, bg_buf.as_mut_ptr());
     let detected_bg = (bg_buf[0], bg_buf[1], bg_buf[2]);
 
-    // 2. Background Keyout if requested
+    // ---- 2. Background keyout if requested --------------------------------------------------
     if remove_bg == 1 {
         let (tr, tg, tb) = if bg_r <= 255 && bg_g <= 255 && bg_b <= 255 {
             (bg_r as u8, bg_g as u8, bg_b as u8)
         } else {
             detected_bg
         };
-        wasm_remove_background(ptr, total_pixels * 4, tr, tg, tb, bg_tol);
+        wasm_remove_background(work_ptr, total_pixels * 4, tr, tg, tb, bg_tol);
     }
 
-    // 3. Pre-clean anti-aliased edge fringes
-    wasm_clean_edges(ptr, width, height, 15);
-
-    // Clean outer 2 perimeter rows/columns if close to detected background
-    let bg_tol_sq = (bg_tol * bg_tol * 2) as u64;
-    for x in 0..w {
-        for &y in &[0usize, 1usize, h.saturating_sub(2), h.saturating_sub(1)] {
-            if y >= h { continue; }
-            let idx = (y * w + x) * 4;
-            if pixels[idx + 3] > 32 {
-                let d = color_dist_sq(pixels[idx], pixels[idx + 1], pixels[idx + 2], detected_bg.0, detected_bg.1, detected_bg.2);
-                if d <= bg_tol_sq {
-                    pixels[idx] = detected_bg.0;
-                    pixels[idx + 1] = detected_bg.1;
-                    pixels[idx + 2] = detected_bg.2;
-                }
-            }
-        }
-    }
-    for y in 0..h {
-        for &x in &[0usize, 1usize, w.saturating_sub(2), w.saturating_sub(1)] {
-            if x >= w { continue; }
-            let idx = (y * w + x) * 4;
-            if pixels[idx + 3] > 32 {
-                let d = color_dist_sq(pixels[idx], pixels[idx + 1], pixels[idx + 2], detected_bg.0, detected_bg.1, detected_bg.2);
-                if d <= bg_tol_sq {
-                    pixels[idx] = detected_bg.0;
-                    pixels[idx + 1] = detected_bg.1;
-                    pixels[idx + 2] = detected_bg.2;
-                }
-            }
-        }
+    // ---- 3. Pre-clean anti-aliased edge fringes (native resolution only) ---------------------
+    // At upscaled resolution the quantizer snaps edge pixels cleanly by itself, and this filter
+    // is what used to make tiny shapes lumpy.
+    if scale == 1 {
+        wasm_clean_edges(work_ptr, w32, h32, 15);
     }
 
-    // 4. Quantize to K dominant perceptual colors (eliminates muddy intermediate layers)
-    // Guard: if there are no opaque pixels, return an empty SVG instead of panicking in vtracer
-    let opaque_count = (0..total_pixels).filter(|&i| pixels[i * 4 + 3] >= 32).count();
-    if opaque_count == 0 {
-        let empty_svg = format!(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {} {}" width="100%" height="100%"></svg>"#,
-            width, height
-        );
-        let wireframe_svg = empty_svg.clone();
-        let json = format!(
-            "{{\"svg\":{},\"wireframe\":{},\"palette\":[],\"detectedBg\":{{\"r\":{},\"g\":{},\"b\":{}}},\"stats\":{{\"width\":{},\"height\":{},\"pathCount\":0,\"nodeCount\":0,\"colorCount\":0,\"svgSize\":{}}}}}",
-            serde_json_escape(&empty_svg),
-            serde_json_escape(&wireframe_svg),
-            detected_bg.0, detected_bg.1, detected_bg.2,
-            width, height, empty_svg.len()
-        );
-        let bytes = json.into_bytes();
-        let len = bytes.len();
-        unsafe { *out_len = len; }
-        let out_ptr = alloc(len);
-        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr, len); }
-        return out_ptr;
-    }
+    // ---- 4. Border cleanup + quantization + circle snapping ----------------------------------
     let k = if num_colors >= 2 && num_colors <= 64 { num_colors as usize } else { 12 };
-    quantize_palette_perceptual(pixels, w, h, k);
 
-    // 5. Optional pre-filter blur
+    let circles: Vec<SnappedCircle> = {
+        let pixels = unsafe { std::slice::from_raw_parts_mut(work_ptr, total_pixels * 4) };
+
+        // Clean outer perimeter rows/columns if close to detected background
+        let border = 2 * scale;
+        let bg_tol_sq = (bg_tol * bg_tol * 2) as u64;
+        for y in 0..h {
+            if y < border || y + border >= h {
+                for x in 0..w {
+                    snap_px_to_bg(pixels, (y * w + x) * 4, detected_bg, bg_tol_sq);
+                }
+            } else {
+                for x in 0..border.min(w) {
+                    snap_px_to_bg(pixels, (y * w + x) * 4, detected_bg, bg_tol_sq);
+                }
+                for x in w.saturating_sub(border)..w {
+                    snap_px_to_bg(pixels, (y * w + x) * 4, detected_bg, bg_tol_sq);
+                }
+            }
+        }
+
+        // Guard: if there are no opaque pixels, return an empty SVG instead of panicking in vtracer
+        let opaque_count = (0..total_pixels).filter(|&i| pixels[i * 4 + 3] >= 32).count();
+        if opaque_count == 0 {
+            let empty_svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {} {}" width="100%" height="100%"></svg>"#,
+                w, h
+            );
+            let wireframe_svg = empty_svg.clone();
+            let json = format!(
+                "{{\"svg\":{},\"wireframe\":{},\"palette\":[],\"detectedBg\":{{\"r\":{},\"g\":{},\"b\":{}}},\"stats\":{{\"width\":{},\"height\":{},\"pathCount\":0,\"nodeCount\":0,\"colorCount\":0,\"svgSize\":{}}}}}",
+                serde_json_escape(&empty_svg),
+                serde_json_escape(&wireframe_svg),
+                detected_bg.0, detected_bg.1, detected_bg.2,
+                width, height, empty_svg.len()
+            );
+            let bytes = json.into_bytes();
+            let len = bytes.len();
+            unsafe { *out_len = len; }
+            let out_ptr = alloc(len);
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr, len); }
+            return out_ptr;
+        }
+
+        // Quantize to K dominant perceptual colors (eliminates muddy intermediate layers)
+        let isolation = if scale > 1 { 0 } else { 1 };
+        quantize_palette_perceptual(pixels, w, h, k, isolation);
+
+        // Replace small solid round blobs by perfect circles
+        if SNAP_CIRCLES {
+            snap_circles(pixels, w, h, scale)
+        } else {
+            Vec::new()
+        }
+    };
+
+    // ---- 5. Optional pre-filter blur (radius is in ORIGINAL pixels) --------------------------
     if blur_radius > 0 {
-        wasm_box_blur(ptr, width, height, blur_radius);
+        wasm_box_blur(work_ptr, w32, h32, blur_radius * scale as u32);
     }
 
-    // 6. Build VTracer Config dynamically matching Detail Level (Vector Magic High / Med / Low)
+    // ---- 6. Build VTracer Config (pixel-based values scale with the upscale factor) ----------
     let mut cfg = Config::from_preset(Preset::Poster);
     cfg.hierarchical = Hierarchical::Stacked;
     cfg.mode = FitMode::Spline;
@@ -620,31 +1067,30 @@ pub extern "C" fn wasm_vectorize(
     match detail_level {
         2 => {
             // High Detail: Vector Magic "Anti-aliased artwork, High"
-            // Preserves small facial features, finger separations, and sharp cusps
-            cfg.filter_speckle = std::cmp::max(2, min_path_len as usize);
+            cfg.filter_speckle = std::cmp::max(2, min_path_len as usize) * scale;
             cfg.layer_difference = 12;
-            cfg.corner_threshold = if corner_threshold > 0 { corner_threshold as i32 } else { 50 };
-            cfg.length_threshold = 2.0;
+            cfg.corner_threshold = if corner_threshold > 0 { corner_threshold as i32 } else { 60 };
+            cfg.length_threshold = (3.0 * sf) as _;
             cfg.max_iterations = 12;
-            cfg.splice_threshold = if splice_threshold > 0 { splice_threshold as i32 } else { 40 };
+            cfg.splice_threshold = if splice_threshold > 0 { splice_threshold as i32 } else { 45 };
             cfg.simplify = if curve_smoothness > 0.0 { Some(curve_smoothness as f64) } else { Some(0.4) };
         }
         0 => {
             // Low Detail: Maximum simplification, large clean shapes
-            cfg.filter_speckle = std::cmp::max(8, min_path_len as usize);
+            cfg.filter_speckle = std::cmp::max(8, min_path_len as usize) * scale;
             cfg.layer_difference = 24;
-            cfg.corner_threshold = if corner_threshold > 0 { corner_threshold as i32 } else { 75 };
-            cfg.length_threshold = 5.5;
+            cfg.corner_threshold = if corner_threshold > 0 { corner_threshold as i32 } else { 80 };
+            cfg.length_threshold = (6.0 * sf) as _;
             cfg.max_iterations = 8;
             cfg.splice_threshold = if splice_threshold > 0 { splice_threshold as i32 } else { 55 };
             cfg.simplify = if curve_smoothness > 0.0 { Some(curve_smoothness as f64) } else { Some(1.8) };
         }
         _ => {
             // Medium Detail (Default): Balanced smooth curves & detail
-            cfg.filter_speckle = std::cmp::max(4, min_path_len as usize);
+            cfg.filter_speckle = std::cmp::max(4, min_path_len as usize) * scale;
             cfg.layer_difference = 16;
-            cfg.corner_threshold = if corner_threshold > 0 { corner_threshold as i32 } else { 60 };
-            cfg.length_threshold = 3.5;
+            cfg.corner_threshold = if corner_threshold > 0 { corner_threshold as i32 } else { 70 };
+            cfg.length_threshold = (4.5 * sf) as _;
             cfg.max_iterations = 10;
             cfg.splice_threshold = if splice_threshold > 0 { splice_threshold as i32 } else { 45 };
             cfg.simplify = if curve_smoothness > 0.0 { Some(curve_smoothness as f64) } else { Some(0.8) };
@@ -655,10 +1101,13 @@ pub extern "C" fn wasm_vectorize(
         cfg.max_colors = Some(num_colors as usize);
     }
 
-    let img = ColorImage {
-        pixels: pixels.to_vec(),
-        width: w,
-        height: h,
+    let img = {
+        let pixels = unsafe { std::slice::from_raw_parts(work_ptr as *const u8, total_pixels * 4) };
+        ColorImage {
+            pixels: pixels.to_vec(),
+            width: w,
+            height: h,
+        }
     };
 
     let pipeline_res = cfg.build();
@@ -667,12 +1116,12 @@ pub extern "C" fn wasm_vectorize(
             Ok(s) => s,
             Err(e) => format!(
                 r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {} {}"><text y="20">Error: {:?}</text></svg>"##,
-                width, height, e
+                w, h, e
             ),
         },
         Err(e) => format!(
             r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {} {}"><text y="20">Config Error: {:?}</text></svg>"##,
-            width, height, e
+            w, h, e
         ),
     };
 
@@ -728,11 +1177,11 @@ pub extern "C" fn wasm_vectorize(
                 }
             }
 
-            // Ensure viewBox exists
+            // Ensure viewBox exists (in WORKING = upscaled coordinates, same aspect ratio as the source)
             if !cleaned.contains("viewBox=") {
                 // insert before closing '>'
                 if let Some(gt) = cleaned.rfind('>') {
-                    let vb = format!(r#" viewBox="0 0 {} {}""#, width, height);
+                    let vb = format!(r#" viewBox="0 0 {} {}""#, w, h);
                     cleaned.insert_str(gt, &vb);
                 }
             }
@@ -747,13 +1196,18 @@ pub extern "C" fn wasm_vectorize(
         }
     }
 
+    // Add perfect circles (eyes, dots...) on top of the traced layers
+    svg_string = append_circles(svg_string, &circles);
+
     // Stroke Modes:
-    // 0 = Vector Magic Standard (Solid Fill + 1px Seam-Sealing Stroke):
-    //     Every path keeps its solid fill AND gets matching 1px stroke with round linejoin.
-    //     This eliminates hairline gaps between adjacent vector shapes and gives rich, solid, smooth line art.
+    // 0 = Vector Magic Standard (Solid Fill + configurable Seam-Sealing Stroke):
+    //     Every path keeps its solid fill AND gets a matching stroke with round linejoin.
+    //     This eliminates hairline gaps between adjacent vector shapes.
+    //     Setting stroke_width to 0 removes the stroke (pure fill).
     // 1 = Pure Solid Fill (fill only, no stroke attributes)
     // 2 = Single Stroke Outlines (fill="none" stroke="..." stroke-width="sw")
-    if stroke_mode == 0 {
+    if stroke_mode == 0 && stroke_width > 0.0 {
+        let seam = stroke_width * scale as f32;
         let mut enhanced = String::with_capacity(svg_string.len() + svg_string.len() / 6);
         for line in svg_string.lines() {
             if line.contains("<path") && line.contains("fill=\"") {
@@ -763,8 +1217,8 @@ pub extern "C" fn wasm_vectorize(
                         let fill_val = &after_fill[..quote_end];
                         if fill_val != "none" {
                             let stroke_attr = format!(
-                                r#" stroke="{}" stroke-width="1" stroke-linejoin="round""#,
-                                fill_val
+                                r#" stroke="{}" stroke-width="{:.2}" stroke-linejoin="round""#,
+                                fill_val, seam
                             );
                             let mod_line = line.replacen(
                                 &format!(r#"fill="{}""#, fill_val),
@@ -783,15 +1237,15 @@ pub extern "C" fn wasm_vectorize(
         }
         svg_string = enhanced;
     } else if stroke_mode == 2 {
-        let sw = if stroke_width > 0.1 { stroke_width } else { 1.5 };
+        let sw = (if stroke_width > 0.0 { stroke_width } else { 1.5 }) * scale as f32;
         svg_string = svg_string.replace("fill=\"", "fill=\"none\" stroke=\"");
         svg_string = svg_string.replace(
             "<path ",
-            &format!("<path stroke-width=\"{:.1}\" stroke-linecap=\"round\" stroke-linejoin=\"round\" ", sw),
+            &format!("<path stroke-width=\"{:.2}\" stroke-linecap=\"round\" stroke-linejoin=\"round\" ", sw),
         );
     }
 
-    // 5. Extract Palette & Statistics from SVG
+    // 7. Extract Palette & Statistics from SVG
     let mut palette_map: HashMap<String, (u8, u8, u8, usize, usize)> = HashMap::new();
     let mut total_paths = 0usize;
     let mut total_nodes = 0usize;
@@ -816,11 +1270,7 @@ pub extern "C" fn wasm_vectorize(
                 if let Some(quote_end) = after_fill.find('"') {
                     let col_str = &after_fill[..quote_end];
                     if col_str != "none" && !col_str.is_empty() {
-                        let hex = if col_str.starts_with('#') {
-                            col_str.to_string()
-                        } else {
-                            col_str.to_string()
-                        };
+                        let hex = col_str.to_string();
 
                         let (r, g, b) = parse_hex_or_rgb(&hex);
                         let entry = palette_map.entry(hex).or_insert((r, g, b, 0, 0));
@@ -848,15 +1298,19 @@ pub extern "C" fn wasm_vectorize(
     pal_json.push(']');
 
     // Build Wireframe SVG
-    let wireframe_inner = svg_string.replace("fill=\"", "fill=\"none\" stroke=\"#3b82f6\" stroke-width=\"0.8\" data-fill=\"");
+    let wire_sw = 0.8 * scale as f32;
+    let wireframe_inner = svg_string.replace(
+        "fill=\"",
+        &format!("fill=\"none\" stroke=\"#3b82f6\" stroke-width=\"{:.1}\" data-fill=\"", wire_sw),
+    );
     let wireframe_svg = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {} {}\" width=\"100%\" height=\"100%\" style=\"shape-rendering: geometricPrecision;\">\n<rect width=\"{}\" height=\"{}\" fill=\"#0f172a\" fill-opacity=\"0.6\" />\n<g class=\"wireframe-paths\">{}</g>\n</svg>",
-        width, height,
-        width, height,
+        w, h,
+        w, h,
         wireframe_inner
     );
 
-    // Build Final JSON Package
+    // Build Final JSON Package (stats report the ORIGINAL image size)
     let json = format!(
         "{{\"svg\":{},\"wireframe\":{},\"palette\":{},\"detectedBg\":{{\"r\":{},\"g\":{},\"b\":{}}},\"stats\":{{\"width\":{},\"height\":{},\"pathCount\":{},\"nodeCount\":{},\"colorCount\":{},\"svgSize\":{}}}}}",
         serde_json_escape(&svg_string),
@@ -966,6 +1420,16 @@ mod tests {
     }
 
     #[test]
+    fn test_upscale_preserves_flat_color() {
+        let src = vec![10u8, 20, 30, 255].repeat(4 * 4);
+        let out = upscale_catmull_rom(&src, 4, 4, 3);
+        assert_eq!(out.len(), 12 * 12 * 4);
+        for px in out.chunks(4) {
+            assert_eq!(px, &[10, 20, 30, 255]);
+        }
+    }
+
+    #[test]
     fn test_wasm_vectorize_high_detail() {
         let width = 50u32;
         let height = 50u32;
@@ -1011,7 +1475,57 @@ mod tests {
 
         assert!(json_str.contains("\"svg\":"));
         assert!(json_str.contains("<path"));
+        // stats keep reporting the ORIGINAL size even though tracing ran upscaled
+        assert!(json_str.contains("\"width\":50,\"height\":50"));
+        wasm_free_string(res_ptr, out_len);
+    }
+
+    #[test]
+    fn test_small_disk_becomes_perfect_circle() {
+        let width = 160u32;
+        let height = 160u32;
+        let mut pixels = vec![255u8; (width * height * 4) as usize];
+
+        // Small black "eye": radius 5px at the center of a white 160x160 image
+        let (cx, cy, r) = (80i32, 80i32, 5i32);
+        for y in 0..height as i32 {
+            for x in 0..width as i32 {
+                if (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r {
+                    let idx = ((y as u32 * width + x as u32) * 4) as usize;
+                    pixels[idx] = 0;
+                    pixels[idx + 1] = 0;
+                    pixels[idx + 2] = 0;
+                }
+            }
+        }
+
+        let mut out_len = 0usize;
+        let res_ptr = wasm_vectorize(
+            pixels.as_mut_ptr(),
+            width,
+            height,
+            4,
+            0,
+            0,
+            999, 999, 999,
+            25,
+            2,
+            1, // pure fill
+            1.5,
+            2,
+            50,
+            0.5,
+            40,
+            &mut out_len,
+        );
+        assert!(!res_ptr.is_null());
+
+        let json_str = unsafe {
+            let slice = std::slice::from_raw_parts(res_ptr, out_len);
+            std::str::from_utf8(slice).unwrap().to_string()
+        };
+        // Perfect circles are emitted as two SVG arcs
+        assert!(json_str.contains("0 1,0"), "expected snapped circle arcs in SVG");
         wasm_free_string(res_ptr, out_len);
     }
 }
-

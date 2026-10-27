@@ -58,7 +58,7 @@ export default function DropZone({ onFileSelect, onLoadSample: _onLoadSample }: 
         </div>
 
         <div>
-          <h2 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '0.4rem', color: '#f8fafc' }}>
+          <h2 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '0.4rem', color: 'var(--text-primary)' }}>
             Magic Vector Studio
           </h2>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', maxWidth: '380px', lineHeight: 1.5 }}>
@@ -82,7 +82,7 @@ export default function DropZone({ onFileSelect, onLoadSample: _onLoadSample }: 
         </label>
 
         <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>
-          Tip: You can also press <kbd style={{ padding: '2px 5px', background: 'rgba(255,255,255,0.1)', borderRadius: 4 }}>Ctrl</kbd> + <kbd style={{ padding: '2px 5px', background: 'rgba(255,255,255,0.1)', borderRadius: 4 }}>V</kbd> to paste from clipboard
+          Tip: You can also press <kbd style={{ padding: '2px 5px', background: 'var(--card-bg)', border: '1px solid var(--border-subtle)', borderRadius: 4, color: 'var(--text-secondary)' }}>Ctrl</kbd> + <kbd style={{ padding: '2px 5px', background: 'var(--card-bg)', border: '1px solid var(--border-subtle)', borderRadius: 4, color: 'var(--text-secondary)' }}>V</kbd> to paste from clipboard
         </div>
       </div>
     </div>

@@ -12,10 +12,37 @@ import {
   VectorStats,
   ViewMode,
   ToolMode,
-  BgStyle
+  BgStyle,
+  Theme
 } from './types';
 
 export default function App() {
+  const [theme, setTheme] = useState<Theme>(() => {
+    try {
+      const saved = localStorage.getItem('vm-theme') as Theme | null;
+      if (saved === 'light' || saved === 'dark') return saved;
+      if (typeof window !== 'undefined' && window.matchMedia) {
+        return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+    } catch {
+      // fallback
+    }
+    return 'dark';
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    try {
+      localStorage.setItem('vm-theme', theme);
+    } catch {
+      // ignore
+    }
+  }, [theme]);
+
+  const handleToggleTheme = useCallback(() => {
+    setTheme(prev => (prev === 'dark' ? 'light' : 'dark'));
+  }, []);
+
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string>('vectormagic_output');
   const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
@@ -314,6 +341,8 @@ export default function App() {
         copied={copied}
         stats={stats}
         onClearImage={handleClearImage}
+        theme={theme}
+        onToggleTheme={handleToggleTheme}
       />
 
       {/* Sub-toolbar */}

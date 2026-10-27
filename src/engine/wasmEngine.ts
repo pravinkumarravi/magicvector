@@ -234,7 +234,8 @@ export function wasmVectorizeFull(
     const minPathLen = options.pathOmit !== undefined ? options.pathOmit : 2;
     // strokeMode: 0 = fill-stroke (Vector Magic standard), 1 = pure fill, 2 = single stroke outline
     const strokeModeVal = options.strokeMode === 'stroke' ? 2 : (options.strokeMode === 'fill' ? 1 : 0);
-    const strokeWidthVal = options.strokeWidth || 1.5;
+    const strokeWidthVal =
+      options.strokeWidth ?? (strokeModeVal === 0 ? 0.5 : 1.5);
 
     const detailLevelVal = options.detailLevel === 'high' ? 2 : (options.detailLevel === 'low' ? 0 : 1);
     const cornerThresholdVal = options.cornerThreshold || 0;

@@ -6,6 +6,8 @@ export type ToolMode = 'select' | 'pan';
 
 export type BgStyle = 'checker-dark' | 'checker-light' | 'solid-white' | 'solid-dark';
 
+export type Theme = 'light' | 'dark';
+
 export interface RgbColor {
   r: number;
   g: number;

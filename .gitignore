@@ -24,4 +24,7 @@ dist-ssr
 *.sw?
 
 # Rust build artifacts
+target
+wasm/target
 wsm/target
+

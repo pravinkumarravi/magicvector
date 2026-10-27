@@ -1,7 +1,7 @@
 import React, { useRef } from 'react';
-import { Upload, Download, Copy, Check, X } from 'lucide-react';
+import { Upload, Download, Copy, Check, X, Sun, Moon } from 'lucide-react';
 import confetti from 'canvas-confetti';
-import { VectorStats } from '../types';
+import { VectorStats, Theme } from '../types';
 
 interface NavbarProps {
   imageLoaded: boolean;
@@ -12,6 +12,8 @@ interface NavbarProps {
   copied: boolean;
   stats: VectorStats | null;
   onClearImage?: () => void;
+  theme: Theme;
+  onToggleTheme: () => void;
 }
 
 export default function Navbar({
@@ -22,7 +24,9 @@ export default function Navbar({
   onCopySvg,
   copied,
   stats: _stats,
-  onClearImage
+  onClearImage,
+  theme,
+  onToggleTheme
 }: NavbarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -114,6 +118,21 @@ export default function Navbar({
             </button>
           </>
         )}
+
+        <div className="toolbar-divider" />
+
+        <button
+          className="btn btn-icon-only theme-toggle-btn"
+          onClick={onToggleTheme}
+          title={`Switch to ${theme === 'dark' ? 'Light' : 'Dark'} Mode`}
+          aria-label={`Switch to ${theme === 'dark' ? 'Light' : 'Dark'} Mode`}
+        >
+          {theme === 'dark' ? (
+            <Sun size={15} className="theme-toggle-icon" />
+          ) : (
+            <Moon size={15} className="theme-toggle-icon" />
+          )}
+        </button>
       </div>
     </header>
   );
